@@ -1,0 +1,21 @@
+[package]
+name = "catp"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+hmac = "0.13"
+sha2 = "0.11"
+hkdf = "0.13"
+
+[[bin]]
+name = "catp-sender"
+path = "src/bin/sender.rs"
+
+[[bin]]
+name = "catp-collector"
+path = "src/bin/collector.rs"
+
+[[bin]]
+name = "catp-vectors"
+path = "src/bin/vectors.rs"

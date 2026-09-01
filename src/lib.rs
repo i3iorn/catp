@@ -1,0 +1,613 @@
+//! CATP v1 reference implementation.
+//!
+//! Covers the core protocol of `docs/PROTOCOL.md`: the 9-byte datagram header,
+//! 3-byte record framing, the bare `NUMBER` literal, HKDF epoch keys, and
+//! offset-keyed replay protection.
+//!
+//! Cipher suites `0x01` (HMAC-SHA256-t64) and `0x04` (HMAC-SHA256-t32) are
+//! implemented. `0x02` (SipHash) and `0x03` (ChaCha20-Poly1305) are registered
+//! in [`CipherId`] but return [`Error::CipherUnimplemented`], so the framing and
+//! key-schedule paths stay honest about what has actually been exercised.
+
+use hkdf::Hkdf;
+// `KeyInit` supplies `new_from_slice`; it moved off `Mac` in digest 0.11.
+use hmac::digest::KeyInit;
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+
+pub mod control;
+pub mod peer;
+pub mod wire;
+
+pub use control::{Capability, Control};
+pub use peer::{Collector, NodeClock, PeerState};
+pub use wire::{Datagram, Record};
+
+/// Protocol version carried in the high 3 bits of header byte 0.
+pub const VERSION: u8 = 1;
+
+/// Epoch duration in seconds (PROTOCOL.md 9.1).
+pub const EPOCH_SECS: u64 = 128;
+
+/// `epoch_offset` ticks per second (PROTOCOL.md 6.4.2).
+pub const TICKS_PER_SEC: u64 = 4096;
+
+/// Ticks in one epoch. Exactly `2^19`, so the 19-bit field spans an epoch.
+pub const TICKS_PER_EPOCH: u32 = 1 << 19;
+
+const _: () = assert!(EPOCH_SECS * TICKS_PER_SEC == TICKS_PER_EPOCH as u64);
+
+/// Largest `size` a record header can express (12 bits).
+pub const MAX_BODY: usize = 4095;
+
+/// Datagram header length in bytes.
+pub const HEADER_LEN: usize = 9;
+
+/// Record header length in bytes.
+pub const RECORD_HEADER_LEN: usize = 3;
+
+/// Longest legal `NUMBER` payload (PROTOCOL.md 6.3).
+pub const MAX_NUMBER_LEN: usize = 32;
+
+/// Conservative IPv4 `max_datagram_size` (PROTOCOL.md 3.1).
+pub const MAX_DATAGRAM_IPV4: usize = 512;
+
+// ---------------------------------------------------------------- identifiers
+
+/// Direction byte mixed into key derivation (PROTOCOL.md 9.2.2).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u8)]
+pub enum Direction {
+    NodeToCollector = 0x00,
+    CollectorToNode = 0x01,
+}
+
+/// Cipher suite registry (PROTOCOL.md 8.1).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u8)]
+pub enum CipherId {
+    HmacSha256T64 = 0x01,
+    SipHash24 = 0x02,
+    ChaCha20Poly1305 = 0x03,
+    HmacSha256T32 = 0x04,
+}
+
+impl CipherId {
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0x01 => Some(Self::HmacSha256T64),
+            0x02 => Some(Self::SipHash24),
+            0x03 => Some(Self::ChaCha20Poly1305),
+            0x04 => Some(Self::HmacSha256T32),
+            _ => None,
+        }
+    }
+    pub fn tag_len(self) -> usize {
+        match self {
+            Self::HmacSha256T64 | Self::SipHash24 => 8,
+            Self::ChaCha20Poly1305 => 16,
+            Self::HmacSha256T32 => 4,
+        }
+    }
+    /// True for suites this reference implementation can actually compute.
+    pub fn implemented(self) -> bool {
+        matches!(self, Self::HmacSha256T64 | Self::HmacSha256T32)
+    }
+}
+
+/// Message types (PROTOCOL.md 6.1, 6.2). 5 bits: `0x00`-`0x1F`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u8)]
+pub enum MsgType {
+    Message = 0x01,
+    Event = 0x02,
+    Alarm = 0x03,
+    Number = 0x04,
+    EpochAnnounce = 0x10,
+    TimeAnnounce = 0x11,
+    Heartbeat = 0x12,
+    CapabilityAdvertise = 0x13,
+}
+
+impl MsgType {
+    /// Framing is a property of the type, not the range (PROTOCOL.md 6).
+    pub fn is_record_framed(self) -> bool {
+        matches!(self, Self::Message | Self::Event | Self::Alarm)
+    }
+}
+
+impl MsgType {
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0x01 => Some(Self::Message),
+            0x02 => Some(Self::Event),
+            0x03 => Some(Self::Alarm),
+            0x04 => Some(Self::Number),
+            0x10 => Some(Self::EpochAnnounce),
+            0x11 => Some(Self::TimeAnnounce),
+            0x12 => Some(Self::Heartbeat),
+            0x13 => Some(Self::CapabilityAdvertise),
+            _ => None,
+        }
+    }
+}
+
+/// `msg_type & 0x10` selects control vs record-framed (PROTOCOL.md 6).
+pub fn is_control(msg_type: u8) -> bool {
+    msg_type & 0x10 != 0
+}
+
+/// `msg_type & 0x08` selects vendor vs standard (PROTOCOL.md 6).
+pub fn is_vendor(msg_type: u8) -> bool {
+    msg_type & 0x08 != 0
+}
+
+/// Record body encodings (PROTOCOL.md 6.4.1). 4 bits.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u8)]
+pub enum Format {
+    None = 0x01,
+    Cbor = 0x02,
+    MsgPack = 0x03,
+    Protobuf = 0x04,
+    FlatBuffers = 0x05,
+    CapnProto = 0x06,
+}
+
+impl Format {
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0x01 => Some(Self::None),
+            0x02 => Some(Self::Cbor),
+            0x03 => Some(Self::MsgPack),
+            0x04 => Some(Self::Protobuf),
+            0x05 => Some(Self::FlatBuffers),
+            0x06 => Some(Self::CapnProto),
+            _ => None,
+        }
+    }
+}
+
+// --------------------------------------------------------------------- errors
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum Error {
+    /// Datagram shorter than header + tag.
+    TooShort,
+    UnsupportedVersion(u8),
+    /// `msg_type` is `0x00` or not implemented.
+    BadMsgType(u8),
+    UnknownSender(u32),
+    /// `cipher_id` differs from the suite configured for this peer.
+    CipherMismatch { got: u8, want: u8 },
+    CipherUnimplemented(u8),
+    /// `epoch_low` did not reconstruct within the acceptance window.
+    EpochOutOfWindow,
+    AuthFailed,
+    Replay,
+    /// Payload does not frame cleanly into records, or control layout is wrong.
+    Framing(&'static str),
+    /// Body exceeds what `size` can express.
+    BodyTooLarge(usize),
+    /// Datagram would exceed `max_datagram_size`.
+    Oversize(usize),
+    /// Sender may not reuse a `datagram_offset` within an epoch.
+    OffsetReuse(u32),
+    /// `NUMBER` payload violates the grammar of PROTOCOL.md 6.3.
+    BadNumber(&'static str),
+    /// `EPOCH_ANNOUNCE` at or below the highest accepted (PROTOCOL.md 9.4).
+    EpochRollback { got: u32, hi: u32 },
+    /// `TIME_ANNOUNCE` at or below the persisted floor (PROTOCOL.md 11.4).
+    TimeRollback { asserted: i64, floor: i64 },
+    /// `TIME_ANNOUNCE` arrived at a node whose clock is already set.
+    ClockAlreadyValid,
+    NoClock,
+}
+
+/// Validate a `NUMBER` payload against the grammar of PROTOCOL.md 6.3.
+///
+/// `[-] int [ "." frac ]`, canonical: no leading zeros unless the integer part
+/// is exactly `0`, no `-0`, no bare `23.` or `.5`, no exponent or sign prefix.
+/// Trailing zeros in the fraction are allowed and significant.
+pub fn validate_number(p: &[u8]) -> Result<(), Error> {
+    if p.is_empty() {
+        return Err(Error::BadNumber("empty"));
+    }
+    if p.len() > MAX_NUMBER_LEN {
+        return Err(Error::BadNumber("longer than 32 bytes"));
+    }
+    let neg = p[0] == b'-';
+    let digits = if neg { &p[1..] } else { p };
+    if digits.is_empty() {
+        return Err(Error::BadNumber("sign with no digits"));
+    }
+    let (int, frac) = match digits.iter().position(|&c| c == b'.') {
+        Some(i) => (&digits[..i], Some(&digits[i + 1..])),
+        None => (digits, None),
+    };
+    if int.is_empty() {
+        return Err(Error::BadNumber("no integer part"));
+    }
+    if !int.iter().all(|c| c.is_ascii_digit()) {
+        return Err(Error::BadNumber("non-digit in integer part"));
+    }
+    if int.len() > 1 && int[0] == b'0' {
+        return Err(Error::BadNumber("leading zero"));
+    }
+    if let Some(f) = frac {
+        if f.is_empty() {
+            return Err(Error::BadNumber("trailing decimal point"));
+        }
+        if !f.iter().all(|c| c.is_ascii_digit()) {
+            return Err(Error::BadNumber("non-digit in fraction"));
+        }
+        if f.contains(&b'.') {
+            return Err(Error::BadNumber("more than one decimal point"));
+        }
+    }
+    // Reject -0 and -0.000: negative zero has no canonical use here.
+    if neg && int == b"0" && frac.map_or(true, |f| f.iter().all(|&c| c == b'0')) {
+        return Err(Error::BadNumber("negative zero"));
+    }
+    Ok(())
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+impl std::error::Error for Error {}
+
+// ------------------------------------------------------------------ key sched
+
+/// Per-node 32-byte secret, provisioned out of band (PROTOCOL.md 9.2).
+#[derive(Clone)]
+pub struct DeviceSecret(pub [u8; 32]);
+
+impl DeviceSecret {
+    /// `epoch_key = HKDF-Expand(PRK, "CATP1" || sender_id || epoch_id || direction, 32)`
+    pub fn epoch_key(&self, sender_id: u32, epoch_id: u32, dir: Direction) -> [u8; 32] {
+        let hk = Hkdf::<Sha256>::new(None, &self.0);
+        let mut info = Vec::with_capacity(5 + 4 + 4 + 1);
+        info.extend_from_slice(b"CATP1");
+        info.extend_from_slice(&sender_id.to_be_bytes());
+        info.extend_from_slice(&epoch_id.to_be_bytes());
+        info.push(dir as u8);
+        let mut okm = [0u8; 32];
+        hk.expand(&info, &mut okm).expect("32 is a valid HKDF length");
+        okm
+    }
+
+    /// Epoch-independent bootstrap key (PROTOCOL.md 11.2).
+    pub fn time_key(&self, sender_id: u32) -> [u8; 32] {
+        let hk = Hkdf::<Sha256>::new(None, &self.0);
+        let mut info = Vec::with_capacity(10 + 4 + 1);
+        info.extend_from_slice(b"CATP1-time");
+        info.extend_from_slice(&sender_id.to_be_bytes());
+        info.push(Direction::CollectorToNode as u8);
+        let mut okm = [0u8; 32];
+        hk.expand(&info, &mut okm).expect("32 is a valid HKDF length");
+        okm
+    }
+}
+
+/// Compute a tag of `tag_len` bytes over `msg` under `key`.
+pub fn mac(cipher: CipherId, key: &[u8; 32], msg: &[u8]) -> Result<Vec<u8>, Error> {
+    if !cipher.implemented() {
+        return Err(Error::CipherUnimplemented(cipher as u8));
+    }
+    let mut m = <Hmac<Sha256> as KeyInit>::new_from_slice(key)
+        .expect("HMAC accepts any key length");
+    m.update(msg);
+    let full = m.finalize().into_bytes();
+    Ok(full[..cipher.tag_len()].to_vec())
+}
+
+/// Constant-time comparison (PROTOCOL.md 7.4).
+pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+// ------------------------------------------------------------------ epoch math
+
+/// `epoch_id = floor(unix_time / 128)` (PROTOCOL.md 9.2.4).
+pub fn epoch_id_at(unix_secs: u64) -> u32 {
+    (unix_secs / EPOCH_SECS) as u32
+}
+
+/// Tick within the epoch for a given instant (PROTOCOL.md 6.4.2).
+pub fn epoch_offset_at(unix_secs: u64, nanos: u32) -> u32 {
+    let into_epoch = unix_secs % EPOCH_SECS;
+    let ticks = into_epoch * TICKS_PER_SEC + (nanos as u64 * TICKS_PER_SEC) / 1_000_000_000;
+    (ticks % TICKS_PER_EPOCH as u64) as u32
+}
+
+/// Reconstruct the full epoch from 4 transmitted bits (PROTOCOL.md 9.3).
+///
+/// Candidates are `{local - 1, local}`; the one whose low 2 bits match wins.
+/// Returns `None` when neither matches, which is the out-of-window case.
+pub fn reconstruct_epoch(local_epoch: u32, epoch_low: u8) -> Option<u32> {
+    let low = epoch_low & 0x0F;
+    if (local_epoch & 0x0F) as u8 == low {
+        return Some(local_epoch);
+    }
+    if local_epoch > 0 && ((local_epoch - 1) & 0x0F) as u8 == low {
+        return Some(local_epoch - 1);
+    }
+    None
+}
+
+// --------------------------------------------------------------- replay window
+
+/// Sliding bitmap over tick space, per sender per epoch (PROTOCOL.md 10.2).
+///
+/// Because offsets are clock ticks, `entries` is a *duration*: at 4096 ticks per
+/// second, 4096 entries is one second of reordering tolerance regardless of how
+/// fast the sender transmits.
+pub struct ReplayWindow {
+    high: Option<u32>,
+    bits: Vec<u64>,
+    entries: u32,
+}
+
+impl ReplayWindow {
+    pub fn new(entries: u32) -> Self {
+        assert!(entries > 0 && entries % 64 == 0, "entries must be a positive multiple of 64");
+        Self { high: None, bits: vec![0; (entries / 64) as usize], entries }
+    }
+
+    /// One second of tolerance at the specified tick rate.
+    pub fn one_second() -> Self {
+        Self::new(TICKS_PER_SEC as u32)
+    }
+
+    fn mark(&mut self, off: u32) {
+        let idx = (off % self.entries) as usize;
+        self.bits[idx / 64] |= 1u64 << (idx % 64);
+    }
+    fn seen(&self, off: u32) -> bool {
+        let idx = (off % self.entries) as usize;
+        self.bits[idx / 64] & (1u64 << (idx % 64)) != 0
+    }
+
+    /// Accept `off`, or reject it as a replay. Mutates only on acceptance.
+    pub fn check_and_set(&mut self, off: u32) -> Result<(), Error> {
+        match self.high {
+            None => {
+                self.high = Some(off);
+                self.mark(off);
+                Ok(())
+            }
+            Some(hi) if off > hi => {
+                // Clear the span we slid past, so wrapped indices are not stale.
+                let advance = (off - hi).min(self.entries);
+                for i in 1..=advance {
+                    let clear = hi.wrapping_add(i);
+                    let idx = (clear % self.entries) as usize;
+                    self.bits[idx / 64] &= !(1u64 << (idx % 64));
+                }
+                self.high = Some(off);
+                self.mark(off);
+                Ok(())
+            }
+            Some(hi) => {
+                if hi - off >= self.entries {
+                    return Err(Error::Replay); // below the window
+                }
+                if self.seen(off) {
+                    return Err(Error::Replay);
+                }
+                self.mark(off);
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Sender-side offset allocation (PROTOCOL.md 10.3, 10.4).
+///
+/// Enforces strictly increasing `datagram_offset` within an epoch, which covers
+/// both a repeated tick and a backward clock step without any non-volatile
+/// state -- the clock does not rewind across a restart, so a rebooted sender's
+/// offsets are naturally beyond any it used before.
+#[derive(Debug, Clone, Default)]
+pub struct Pacer {
+    epoch: Option<u32>,
+    last_offset: Option<u32>,
+}
+
+impl Pacer {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Claim an offset for a datagram sent at this instant.
+    ///
+    /// Returns `OffsetReuse` when the clock has not advanced past the previous
+    /// datagram; the caller must delay, coalesce into records, or shed.
+    pub fn claim(&mut self, unix_secs: u64, nanos: u32) -> Result<(u32, u32), Error> {
+        let epoch = epoch_id_at(unix_secs);
+        let offset = epoch_offset_at(unix_secs, nanos);
+        if self.epoch != Some(epoch) {
+            self.epoch = Some(epoch);
+            self.last_offset = None;
+        }
+        match self.last_offset {
+            Some(prev) if offset <= prev => Err(Error::OffsetReuse(offset)),
+            _ => {
+                self.last_offset = Some(offset);
+                Ok((epoch, offset))
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pacer_rejects_repeated_tick() {
+        let mut p = Pacer::new();
+        assert!(p.claim(1000, 0).is_ok());
+        // Same tick: 1/4096 s is ~244us, so 100us later is still tick 0.
+        assert!(matches!(p.claim(1000, 100_000), Err(Error::OffsetReuse(_))));
+        // Next tick is fine.
+        assert!(p.claim(1000, 300_000).is_ok());
+    }
+
+    #[test]
+    fn pacer_rejects_backward_clock_step() {
+        let mut p = Pacer::new();
+        let (_, a) = p.claim(1000, 500_000_000).unwrap();
+        // NTP steps the clock back within the same epoch.
+        assert!(matches!(p.claim(1000, 100_000_000), Err(Error::OffsetReuse(_))));
+        // And recovers once the clock passes where it was.
+        let (_, b) = p.claim(1000, 900_000_000).unwrap();
+        assert!(b > a);
+    }
+
+    #[test]
+    fn pacer_resets_at_epoch_boundary() {
+        let mut p = Pacer::new();
+        let (e1, o1) = p.claim(1000, 999_000_000).unwrap();
+        // Crossing into the next epoch, offsets restart near zero and that is
+        // not a reuse, because the epoch is part of the tuple.
+        let (e2, o2) = p.claim(1024, 0).unwrap();
+        assert_eq!(e2, e1 + 1);
+        assert!(o2 < o1);
+    }
+
+    #[test]
+    fn pacer_survives_simulated_reboot() {
+        // PROTOCOL.md 10.4: a fresh Pacer after a restart still cannot reuse an
+        // offset, because the clock advanced during the outage.
+        let mut p = Pacer::new();
+        let (_, before) = p.claim(1000, 0).unwrap();
+        let mut rebooted = Pacer::new();
+        let (_, after) = rebooted.claim(1002, 0).unwrap();
+        assert!(after > before);
+    }
+
+    #[test]
+    fn epoch_offset_spans_epoch_exactly() {
+        assert_eq!(epoch_offset_at(0, 0), 0);
+        // The final tick begins at 127 + 4095/4096 s = 127.999755859375 s.
+        // 999_755_859 ns is a hair below that boundary and is still tick 4094.
+        assert_eq!(epoch_offset_at(127, 999_755_859), TICKS_PER_EPOCH - 2);
+        assert_eq!(epoch_offset_at(127, 999_755_860), TICKS_PER_EPOCH - 1);
+        assert_eq!(epoch_offset_at(127, 999_999_999), TICKS_PER_EPOCH - 1);
+        assert_eq!(epoch_offset_at(128, 0), 0);
+    }
+
+    #[test]
+    fn epoch_reconstruction_picks_current_or_previous() {
+        assert_eq!(reconstruct_epoch(100, (100 & 0xF) as u8), Some(100));
+        assert_eq!(reconstruct_epoch(100, (99 & 0xF) as u8), Some(99));
+        // 4 bits reject drift out to 15 epochs before aliasing (PROTOCOL.md 9.3).
+        for back in 2..=15u32 {
+            assert_eq!(reconstruct_epoch(100, ((100 - back) & 0xF) as u8), None, "back={back}");
+        }
+        // At 16 it aliases onto `local`; the MAC over the full epoch_id rejects it.
+        assert_eq!(reconstruct_epoch(100, ((100 - 16) & 0xF) as u8), Some(100));
+    }
+
+    #[test]
+    fn replay_window_rejects_repeats_and_stale() {
+        let mut w = ReplayWindow::new(64);
+        assert!(w.check_and_set(10).is_ok());
+        assert_eq!(w.check_and_set(10), Err(Error::Replay));
+        assert!(w.check_and_set(11).is_ok());
+        assert!(w.check_and_set(9).is_ok()); // in-window, unseen
+        assert_eq!(w.check_and_set(9), Err(Error::Replay));
+        assert!(w.check_and_set(500).is_ok());
+        assert_eq!(w.check_and_set(11), Err(Error::Replay)); // now below window
+    }
+
+    #[test]
+    fn replay_window_clears_on_slide() {
+        let mut w = ReplayWindow::new(64);
+        assert!(w.check_and_set(5).is_ok());
+        // Slide far enough that index 5 wraps to a fresh position.
+        assert!(w.check_and_set(200).is_ok());
+        assert!(w.check_and_set(197).is_ok());
+    }
+
+    #[test]
+    fn unimplemented_ciphers_error_rather_than_lie() {
+        let k = [0u8; 32];
+        assert!(mac(CipherId::HmacSha256T64, &k, b"x").is_ok());
+        assert!(mac(CipherId::HmacSha256T32, &k, b"x").is_ok());
+        assert_eq!(mac(CipherId::SipHash24, &k, b"x"), Err(Error::CipherUnimplemented(0x02)));
+        assert_eq!(
+            mac(CipherId::ChaCha20Poly1305, &k, b"x"),
+            Err(Error::CipherUnimplemented(0x03))
+        );
+    }
+
+    #[test]
+    fn tag_lengths_match_the_registry() {
+        assert_eq!(CipherId::HmacSha256T64.tag_len(), 8);
+        assert_eq!(CipherId::SipHash24.tag_len(), 8);
+        assert_eq!(CipherId::ChaCha20Poly1305.tag_len(), 16);
+        assert_eq!(CipherId::HmacSha256T32.tag_len(), 4);
+        // t32 is a prefix of t64: same construction, different truncation.
+        let k = [9u8; 32];
+        let a = mac(CipherId::HmacSha256T64, &k, b"abc").unwrap();
+        let b = mac(CipherId::HmacSha256T32, &k, b"abc").unwrap();
+        assert_eq!(&a[..4], &b[..]);
+    }
+
+    #[test]
+    fn ct_eq_is_length_and_content_sensitive() {
+        assert!(ct_eq(b"abcd", b"abcd"));
+        assert!(!ct_eq(b"abcd", b"abce"));
+        assert!(!ct_eq(b"abcd", b"abc"));
+        assert!(ct_eq(b"", b""));
+    }
+
+    #[test]
+    fn epoch_key_separates_direction_and_sender() {
+        let s = DeviceSecret([7u8; 32]);
+        let a = s.epoch_key(1, 5, Direction::NodeToCollector);
+        let b = s.epoch_key(1, 5, Direction::CollectorToNode);
+        let c = s.epoch_key(2, 5, Direction::NodeToCollector);
+        let d = s.epoch_key(1, 6, Direction::NodeToCollector);
+        assert_ne!(a, b);
+        assert_ne!(a, c);
+        assert_ne!(a, d);
+        assert_ne!(a, s.time_key(1));
+    }
+
+    #[test]
+    fn number_grammar() {
+        for ok in ["0", "5", "23.5", "23.50", "-12.75", "1013.25", "0.5", "-0.5"] {
+            assert!(validate_number(ok.as_bytes()).is_ok(), "{ok} should be valid");
+        }
+        for bad in ["", "23.", ".5", "007", "-0", "-0.0", "+1", "1e3", "1.2.3", "-", "1 2", "1,5"] {
+            assert!(validate_number(bad.as_bytes()).is_err(), "{bad} should be invalid");
+        }
+        assert!(validate_number(&[b'1'; 32]).is_ok());
+        assert!(validate_number(&[b'1'; 33]).is_err());
+    }
+
+    #[test]
+    fn namespace_bits() {
+        assert!(!is_control(MsgType::Message as u8));
+        assert!(!is_control(MsgType::Number as u8));
+        assert!(is_control(MsgType::Heartbeat as u8));
+        assert!(MsgType::Message.is_record_framed());
+        assert!(!MsgType::Number.is_record_framed());
+        assert!(!is_vendor(MsgType::Message as u8));
+        assert!(is_vendor(0x09));
+        assert!(is_control(0x18) && is_vendor(0x18));
+    }
+}
