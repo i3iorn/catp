@@ -1658,10 +1658,30 @@ TIME_REQUEST is intentionally small and carries no claimed time. In
 particular, a node cannot use it to propose, select, or influence the time that
 the collector will announce.
 
-Because a captured TIME_REQUEST can be replayed, collectors MUST rate-limit
-responses to repeated requests from the same node. Replay of a request can
-cause an additional announcement, but cannot cause the collector to accept
-attacker-chosen time or disclose epoch keys.
+#### 11.3.1 Replay of a request
+
+`TIME_REQUEST` carries `datagram_offset` 0 by construction, so the replay window
+of Section 10.2 cannot cover it. Every other message type in this protocol draws
+its replay protection from the offset; this one has none, and cannot be given
+any, because a node with no clock cannot compute an offset.
+
+Rate limiting is therefore not defence in depth here. It is the entire defence.
+
+Collectors MUST rate-limit responses to repeated requests from the same node.
+The RECOMMENDED default is at most one `TIME_ANNOUNCE` per node per 60 seconds,
+regardless of how many requests arrive in that window.
+
+A deployment that omits the limit turns one captured request into an unbounded
+`TIME_ANNOUNCE` generator, and the amplification favours the attacker: a
+21-byte request elicits a 25-byte response, delivered to a node that will
+discard it unread — Section 11.5 rule 1 refuses any announcement once a clock is
+set — so the traffic is invisible to the node operator and visible only as load
+at the collector.
+
+The consequences remain bounded. A replayed request cannot cause the collector
+to accept attacker-chosen time, cannot disclose epoch keys, and cannot move the
+clock of any node that already has one. This is a resource-exhaustion concern,
+not an authentication one.
 ### 11.4 TIME_ANNOUNCE (0x11)
 
 Payload:
