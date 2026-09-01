@@ -452,9 +452,9 @@ interpretable.
 `msg_type` is a 5-bit field occupying the low 5 bits of header byte 0, so its
 range is `0x00`-`0x1F`.
 
-| Range | Namespace |
-|---|---|
-| `0x00` | Reserved, invalid. MUST be rejected. |
+| Range         | Namespace |
+|---------------|---|
+| `0x00`        | Reserved, invalid. MUST be rejected. |
 | `0x01`-`0x07` | Standard data types. |
 | `0x08`-`0x0F` | Vendor data types. Never assigned by this specification. |
 | `0x10`-`0x17` | Standard control types. |
@@ -878,7 +878,7 @@ filled buffer MUST flush it under the old epoch before beginning a new one.
 ### 6.7 Control message payloads
 
 `EPOCH_ANNOUNCE` and `TIME_ANNOUNCE` are specified in Sections 9.4 and 11.
-`HEARTBEAT` (`0x12`) carries an empty payload.
+`HEARTBEAT` (`0x13`) carries an empty payload.
 
 Control messages (`0x10`-`0x1F`) are not record-framed. They carry neither
 `format`, `schema_version`, nor `size`; their layouts are fixed by this document
@@ -890,7 +890,7 @@ carry. Section 4.1.1 moved that field into the header, so the prefix is gone and
 `HEARTBEAT` is once again a datagram with no payload at all — 13 bytes on the
 wire with the shortest tag, of which 9 are header and 4 are the tag.
 
-#### 6.7.1 CAPABILITY_ADVERTISE (`0x21`)
+#### 6.7.1 CAPABILITY_ADVERTISE (`0x14`)
 
 | Field | Width | Description |
 |---|---|---|
@@ -1662,7 +1662,7 @@ Because a captured TIME_REQUEST can be replayed, collectors MUST rate-limit
 responses to repeated requests from the same node. Replay of a request can
 cause an additional announcement, but cannot cause the collector to accept
 attacker-chosen time or disclose epoch keys.
-### 11.4 TIME_ANNOUNCE (0x15)
+### 11.4 TIME_ANNOUNCE (0x11)
 
 Payload:
 Field	Width	Description
