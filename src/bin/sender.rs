@@ -21,7 +21,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const SENDER_ID: u32 = 0x0000_1234;
 const SECRET: [u8; 32] = [0x5A; 32];
 const CIPHER: CipherId = CipherId::HmacSha256T32;
-const SCHEMA_VERSION: u8 = 1;
+// One schema_version per body layout (PROTOCOL.md 6.4.2.1). Reusing a single
+// value across layouts produces datagrams that authenticate and frame
+// correctly but decode to wrong readings -- the exact failure this field
+// exists to prevent.
+const SENSOR_SCHEMA: u8 = 1;
+const EVENT_SCHEMA: u8 = 2;
+const ALARM_SCHEMA: u8 = 3;
 
 fn now() -> (u64, u32) {
     let d = SystemTime::now()
@@ -167,7 +173,7 @@ fn make_records(seq: u32, per_dg: usize) -> Vec<Record> {
             // RSSI, signed dBm.
             body.extend_from_slice(&signal.to_be_bytes());
 
-            Record::new(Format::None, SCHEMA_VERSION, body)
+            Record::new(Format::None, SENSOR_SCHEMA, body)
         })
         .collect()
 }
@@ -249,7 +255,7 @@ fn make_datagram(
             body.extend_from_slice(&(seq as u16).to_be_bytes());
             body.extend_from_slice(event.as_bytes());
 
-            let record = Record::new(Format::None, SCHEMA_VERSION, body);
+            let record = Record::new(Format::None, EVENT_SCHEMA, body);
 
             Datagram::data(
                 MsgType::Event,
@@ -270,7 +276,7 @@ fn make_datagram(
             body.extend_from_slice(severity.as_bytes());
             body.extend_from_slice(message.as_bytes());
 
-            let record = Record::new(Format::None, SCHEMA_VERSION, body);
+            let record = Record::new(Format::None, ALARM_SCHEMA, body);
 
             Datagram::data(
                 MsgType::Alarm,
