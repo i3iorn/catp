@@ -2,6 +2,9 @@
 name = "catp"
 version = "0.1.0"
 edition = "2024"
+license = "Apache-2.0"
+description = "Compact Authenticated Telemetry Protocol: authenticated, connectionless telemetry over UDP"
+repository = "https://github.com/i3iorn/catp"
 
 [dependencies]
 hmac = "0.13"
