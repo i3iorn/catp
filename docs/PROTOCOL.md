@@ -232,28 +232,23 @@ first sixteen seconds of an epoch.
 
 Every datagram needs a position within its epoch: it is the replay key
 (Section 10), the nonce source for nonce-requiring suites (Section 7.2), and the
-timestamp a receiver records against the reading. An earlier draft took it from
-the first record's own timestamp for data types and from an explicit payload
-field for control types, which worked but made the value's location depend on
-the message type.
+timestamp a receiver records against the reading.
 
-Two things forced it into the header. `NUMBER` (Section 6.3) carries a bare
+Two things put it in the header rather than in the payload. `NUMBER` (Section 6.3) carries a bare
 numeric literal with no record structure to hold an offset, and would otherwise
 have needed the same payload-prefix workaround control messages used. And
 because the offset was read from the payload, a receiver had to parse framing
 before it could check replay, inverting the natural verification order
 (Section 7.4).
 
-With the offset in the header both problems disappear: every message type has
-one, in the same place, readable before the payload is touched. Control
-messages and `NUMBER` carry no prefix, and Section 7.4 returns to checking
-replay immediately after the MAC.
+In the header, every message type has an offset in the same place, readable
+before the payload is touched, and Section 7.4 can check replay immediately
+after the MAC rather than waiting for the payload to be parsed.
 
-The cost is 3 bytes on every datagram, offset against 2 bytes saved on every
-record (Section 6.4). A datagram carrying a single record is 1 byte larger than
-before; one carrying ten is 17 bytes smaller, and one carrying fifty is 97
-bytes smaller. The trade favours exactly the batching the protocol wants to
-encourage.
+The cost is 3 bytes on every datagram, against 2 bytes saved on every record
+(Section 6.4). A single-record datagram is 1 byte larger; ten records are 17
+bytes smaller and fifty are 97 bytes smaller. The trade favours the batching
+the protocol wants to encourage.
 
 ### 4.2 Reserved bits are must-ignore
 
@@ -466,9 +461,9 @@ vendor from standard.
 **Framing is a property of the individual type, not of the range.** Most data
 types are record-framed (Section 6.4), but `NUMBER` is not, and control types
 have fixed layouts. The tables below state the framing for every type, and a
-receiver MUST take it from there rather than inferring it from the range. An
-earlier draft let a single bit decide; `NUMBER` exists precisely to skip record
-framing, so that shortcut no longer holds.
+receiver MUST take it from there rather than inferring it from the range. No
+single bit distinguishes them, because `NUMBER` exists precisely to skip record
+framing.
 
 `0x00` is permanently unassigned so that zero-filled or truncated buffers decode
 as invalid rather than silently matching a real type.
@@ -517,14 +512,12 @@ validated by the protocol.
 | `0x15`-`0x17` | —                      | Reserved. |
 | `0x18`-`0x1F` | —                      | Vendor control types. Fixed layout. |
 
-Earlier drafts assigned `SNAPSHOT`, `DELTA`, `RESYNC_REQUEST`, and
-`SESSION_RESET` to a stateful-replication profile. That profile is withdrawn and
-those code points are reserved. Snapshot/delta replication requires a receiver
-that holds application state, a return path to request resynchronization, and
-timers to bound the divergence between them — three properties that contradict
-the premise that every CATP datagram is independently interpretable. A
-deployment needing them should build them above this protocol rather than inside
-it.
+CATP defines no stateful-replication messages. Snapshot/delta replication
+requires a receiver that holds application state, a return path to request
+resynchronization, and timers to bound the divergence between them — three
+properties that contradict the premise that every CATP datagram is
+independently interpretable. A deployment needing them should build them above
+this protocol rather than inside it.
 
 Deployments needing operational reporting SHOULD define it as a vendor data type
 (`0x08`-`0x0F`), which gives it the same framing protection every other data type
@@ -628,24 +621,23 @@ them byte-wise, as Section 4.3 already requires for the datagram header.
 
 #### 6.4.1 Records do not carry a timestamp
 
-An earlier draft gave every record its own 19-bit `epoch_offset`, so a batch was
-a small time series. That field is now in the datagram header (Section 4.1.1),
-and records no longer carry one.
+Records carry no timestamp of their own. The datagram's `datagram_offset`
+(Section 4.1) is the capture instant for all of them.
 
 The consequence is worth stating plainly: **every record in a datagram shares
-one capture instant**, the datagram's `datagram_offset`. Batching now means
-"several readings taken together", not "a time series in one datagram".
+one capture instant**. Batching means "several readings taken together", not
+"a time series in one datagram".
 
 For the common batching case — several sensors sampled in one pass, or several
-fields of one observation — this loses nothing, because the readings genuinely
+fields of one observation — this costs nothing, because the readings genuinely
 do share an instant. For a sender accumulating readings over seconds and
-flushing them periodically, it does: those readings had distinct capture times
-and the protocol no longer carries them. Such a sender MUST either accept the
-datagram's instant for the whole batch, or carry per-reading timestamps in the
-record body, where the schema defines them.
+flushing them periodically, it does cost: those readings had distinct capture
+times and the protocol does not carry them. Such a sender MUST either accept
+the datagram's instant for the whole batch, or carry per-reading timestamps in
+the record body, where the schema defines them.
 
-In exchange each record costs 3 bytes rather than 5, which is what makes
-batching cheap enough to be the primary compactness lever (Section 6.6).
+The record header is 3 bytes as a result, which is what makes batching cheap
+enough to be the primary compactness lever (Section 6.6).
 
 #### 6.4.2 format
 
@@ -667,11 +659,10 @@ not decode as a valid record, matching `msg_type` `0x00` and `sender_id`
 `0x00000000`.
 
 Every assigned encoding is a compact binary serialization, which is deliberate.
-An earlier draft offered UTF-8 `key=value` and JSON alongside the binary
-options; both are withdrawn. A protocol whose fixed overhead is 38 bytes should
-not bless an encoding in which a single reading costs 60, and a deployment that
-genuinely wants text can carry it under `NONE` without this document appearing
-to recommend it.
+A protocol whose fixed overhead is 41 bytes should not bless an encoding in
+which a single reading costs 60, so no text format is registered. A deployment
+that wants text can carry it under `NONE` without this document appearing to
+recommend it.
 
 `NONE` (`0x01`) imposes no structure at all and is the right choice for
 fixed-width binary telemetry, where the body is a handful of packed fields and
@@ -701,12 +692,12 @@ field definition to hand it.
   published as a new `schema_version`. Values MUST NOT be redefined once
   deployed.
 
-This field restores a property an earlier draft lost. When record encoding was
-labelled but layout was not, a deployment that reordered two same-width fields
-produced datagrams that framed correctly, authenticated correctly, and decoded
-to wrong readings — silently, indefinitely, with no error anywhere in the
-system. `schema_version` makes that a clean rejection: the receiver holds no
-definition for the new version and discards the record instead of misreading it.
+This field exists because labelling the encoding is not enough. Were layout
+unlabelled, a deployment that reordered two same-width fields would produce
+datagrams that framed correctly, authenticated correctly, and decoded to wrong
+readings — silently, indefinitely, with no error anywhere in the system.
+`schema_version` makes that a clean rejection: the receiver holds no definition
+for the new version and discards the record instead of misreading it.
 
 The cost is one byte on every record, which does not amortize across a batch.
 That is the correct price for the failure it prevents: a misread field is
@@ -793,8 +784,8 @@ is whatever the sender chose, most usefully the schema's own field order.
 
 Across datagrams a receiver orders by `(epoch_id, datagram_offset)`, which is a
 total order per sender: Section 10.1 forbids two datagrams from sharing an
-offset within an epoch. This is stronger than the partial order earlier drafts
-provided, and it comes free from moving the offset into the header.
+offset within an epoch, so the pair is a total order per sender rather than a
+partial one.
 
 #### 6.4.6 Mixed formats
 
@@ -846,11 +837,9 @@ or 33 of a 12-byte body, or one record of up to 496.
 Senders MUST NOT exceed `payload_budget`, and SHOULD stop well short of it on
 loss-sensitive links (Section 6.6.1).
 
-Earlier drafts carried an explicit `count` byte and derived record boundaries
-from a per-deployment `sample_size` constant. The `size` field replaces both,
-and buys variable-length bodies, framing that validates without out-of-band
-configuration, and the removal of `sample_size` from the wire protocol
-altogether.
+There is no `count` field and no per-deployment record-width constant. The
+`size` field of each record does both jobs, which buys variable-length bodies
+and framing that validates without any out-of-band configuration.
 
 #### 6.6.1 Batching and loss
 
@@ -884,11 +873,10 @@ Control messages (`0x10`-`0x1F`) are not record-framed. They carry neither
 `format`, `schema_version`, nor `size`; their layouts are fixed by this document
 and identified by `msg_type` alone.
 
-Earlier drafts required every control payload to begin with an explicit
-`datagram_offset`, because replay protection needed a value the header did not
-carry. Section 4.1.1 moved that field into the header, so the prefix is gone and
-`HEARTBEAT` is once again a datagram with no payload at all — 13 bytes on the
-wire with the shortest tag, of which 9 are header and 4 are the tag.
+Because `datagram_offset` is a header field (Section 4.1), control payloads
+carry no offset prefix. `HEARTBEAT` is therefore a datagram with no payload at
+all — 13 bytes on the wire with the shortest tag, of which 9 are header and 4
+are the tag.
 
 #### 6.7.1 CAPABILITY_ADVERTISE (`0x14`)
 
@@ -1054,14 +1042,12 @@ Reserved bits appear nowhere in this list, and that is deliberate. Per
 Section 4.2 they are must-ignore: a receiver that branches on a bit it does not
 understand has implemented rejection, not ignoring.
 
-The replay check precedes framing. An earlier draft had to invert this, because
-`datagram_offset` lived in the payload and could not be read until the payload
-had been parsed. With the field in the header (Section 4.1.1) the natural order
-is restored: a receiver authenticates, admits or rejects the datagram as a
-replay, and only then spends effort interpreting what it carries. A
-malformed-but-authentic datagram from a defective sender is now rejected at
-step 9 having already consumed its offset, which is correct — the offset was
-genuinely used.
+The replay check precedes framing, which the header layout makes possible:
+`datagram_offset` is readable without parsing the payload (Section 4.1). A
+receiver authenticates, admits or rejects the datagram as a replay, and only
+then spends effort interpreting what it carries. A malformed-but-authentic
+datagram from a defective sender is rejected at step 9 having already consumed
+its offset, which is correct — the offset was genuinely used.
 
 Steps 1–6 are inexpensive and reject malformed or policy-violating traffic
 before the MAC computation, limiting the cost of a flood of junk datagrams.
@@ -1151,23 +1137,21 @@ Each association uses exactly one cipher suite, configured out of band per
 whose `cipher_id` differs from the configured value for that `sender_id`, at
 step 5 of Section 7.4, before computing a MAC.
 
-Earlier drafts of this document carried a `security_level` per suite, an
-`accepted_level` high-water mark per peer, and a `CIPHER_ANNOUNCE` message, so
-that cipher strength could only ratchet upward in band. That machinery is
-removed. Its reasoning does not survive contact with CATP's provisioning model:
-a deployment that can distribute a 32-byte `device_secret` out of band can
-distribute a one-byte cipher selection over the same channel, and doing so gives
-a strictly stronger guarantee. Configuration is enforced from the first
-datagram, whereas a high-water mark is only as good as the highest datagram a
-receiver happened to have seen.
+CATP has no in-band mechanism for ratcheting cipher strength upward — no
+per-suite security level, no negotiated floor, no announcement message. Such a
+mechanism does not survive contact with the provisioning model: a deployment
+that can distribute a 32-byte `device_secret` out of band can distribute a
+one-byte cipher selection over the same channel, and doing so gives a strictly
+stronger guarantee. Configuration is enforced from the first datagram, whereas
+a high-water mark is only as good as the highest datagram a receiver happened
+to have seen.
 
-The removed mechanism also had no recovery path by construction.
-`accepted_level` was monotonic, persistent across restarts, and deliberately
-immune to in-band reset, so a single datagram verifying at an elevated level
-would permanently lock out a legitimate peer that later fell back — with no way
-to clear it short of touching the receiver's storage. If an operator must touch
-the receiver either way, the configuration is the better place to express the
-policy.
+A negotiated floor would also have no recovery path. Being monotonic and
+persistent across restarts, it would let a single datagram verifying at an
+elevated level permanently lock out a legitimate peer that later fell back,
+with no way to clear it short of touching the receiver's storage. If an
+operator must touch the receiver either way, the configuration is the better
+place to express the policy.
 
 Migrating an association to a different suite is therefore a provisioning
 operation: update the receiver's configuration for that `sender_id`, then the
@@ -1413,22 +1397,22 @@ batch size costs latency rather than time resolution. At the IPv4 payload budget
 that is over 200,000 records per second per sender, which is far beyond what
 this protocol's target deployments generate.
 
-#### 10.1.1 Why the offset replaces a counter
+#### 10.1.1 One field, three jobs
 
-Earlier drafts carried a separate 2-byte `counter` in the header, incremented
-per datagram and reset each epoch, alongside a per-record timestamp. Both are
-now this one field: it is monotonic within an epoch, unique per tick, and it
-means something.
+`datagram_offset` serves as timestamp, sequence number, and nonce source at
+once. It is monotonic within an epoch, unique per tick, and unlike a
+free-running counter it means something.
 
-Folding them together buys three things:
+Carrying one field rather than a counter and a timestamp separately buys three
+things:
 
 **Bytes off every datagram**, since one field serves as timestamp, sequence
 number, and nonce source rather than three.
 
 **Restart safety for free.** A counter restarts at zero when a device reboots,
-reusing tuples it has already sent — the failure that earlier drafts closed with
-a mandatory non-volatile write per epoch. A clock does not rewind, so a rebooted
-sender's offsets are naturally beyond any it has used. See Section 10.4.
+reusing tuples it has already sent, and closing that would require a
+non-volatile write per epoch. A clock does not rewind, so a rebooted sender's
+offsets are naturally beyond any it has used. See Section 10.4.
 
 **A replay window measured in time.** A bitmap of N offsets covers N ticks of
 wall clock regardless of the sender's rate, rather than N datagrams whose span
@@ -1545,13 +1529,11 @@ holds its last emitted offset in volatile memory and refuses to emit a value at
 or below it, waiting instead for the clock to catch up or for the epoch to
 change.
 
-Earlier drafts required a 32-bit `last_epoch` written to non-volatile storage on
-every epoch, solely to stop a rebooted sender from reusing counter values. That
-requirement is withdrawn for this purpose; the clock now provides the guarantee.
-`last_epoch` is still persisted, but only as the monotonic floor for cold-start
-time recovery (Section 11.4), where nothing else can supply it — so a node that
-has an authenticated time source and does not implement `TIME_ANNOUNCE` needs no
-non-volatile state at all.
+No non-volatile write is needed per epoch to keep offsets unique; the clock
+provides that guarantee on its own. `last_epoch` is persisted only as the
+monotonic floor for cold-start time recovery (Section 11.4), where nothing else
+can supply it — so a node with an authenticated time source that does not
+implement `TIME_ANNOUNCE` needs no non-volatile state at all.
 
 ### 10.5 Offset gaps are not errors
 
@@ -1984,9 +1966,9 @@ Implementations MUST additionally test:
 
 Version 1 is not complete until two independently written implementations
 interoperate against the vectors of Section 14.1. A specification exercised by a
-single implementation has undiscovered ambiguities by default; the framing, key
-derivation, and collector-identity sections of this document were each added or
-rewritten after exactly such an ambiguity was noticed.
+single implementation has undiscovered ambiguities by default: the one reader
+who could find them is the one who has not yet been told what the author
+meant.
 
 ---
 
