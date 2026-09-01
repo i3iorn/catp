@@ -106,34 +106,27 @@ fn sensor_values(seq: u32) -> (i16, u16, u16, u16, i16) {
     (temp, humidity, pressure, battery, signal)
 }
 
-fn make_records(seq: u32, per_dg: usize) -> Vec<Record> {
-    let (temp, humidity, pressure, battery, signal) = sensor_values(seq);
-
-    (0..per_dg)
-        .map(|i| {
-            let n = seq.wrapping_add(i as u32);
-
-            let temp_i = temp.wrapping_add((i as i16) * 2);
-            let humidity_i = humidity.wrapping_add((i as u16) % 7);
+/// Build one batch: `channels` sensors read in a single pass.
+///
+/// PROTOCOL.md 6.4.1 gives every record in a datagram the same capture
+/// instant, so a batch must be several readings taken *together* -- not one
+/// sensor sampled repeatedly, which would be a time series wearing a single
+/// timestamp. Each record here is a different channel of the same
+/// multi-sensor node, which is the case the single-instant rule is for.
+fn make_records(seq: u32, channels: usize) -> Vec<Record> {
+    (0..channels)
+        .map(|ch| {
+            // Readings derive from the channel, not from a rolling sample
+            // number, so the batch is a snapshot rather than a series.
+            let (temp, humidity, pressure, battery, signal) =
+                sensor_values(seq ^ ((ch as u32 + 1) << 24));
 
             let mut body = Vec::with_capacity(12);
-
-            // Synthetic sensor id / sample number.
-            body.extend_from_slice(&n.to_be_bytes()[2..4]);
-
-            // Temperature, hundredths of a degree C.
-            body.extend_from_slice(&temp_i.to_be_bytes());
-
-            // Humidity, tenths of a percent.
-            body.extend_from_slice(&humidity_i.to_be_bytes());
-
-            // Pressure, tenths of hPa.
+            body.extend_from_slice(&(ch as u16).to_be_bytes());
+            body.extend_from_slice(&temp.to_be_bytes());
+            body.extend_from_slice(&humidity.to_be_bytes());
             body.extend_from_slice(&pressure.to_be_bytes());
-
-            // Battery percentage.
             body.extend_from_slice(&battery.to_be_bytes());
-
-            // RSSI, signed dBm.
             body.extend_from_slice(&signal.to_be_bytes());
 
             Record::new(Format::None, SENSOR_SCHEMA, body)
@@ -322,16 +315,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let detail = match kind {
                     MessageKind::Message => {
-                        let (temp, humidity, pressure, battery, signal) =
-                            sensor_values(seq);
-
-                        format!(
-                            "temp={:.2}C humidity={:.1}% pressure={:.1}hPa \
-                             battery={battery}% rssi={signal}dBm",
-                            temp as f32 / 100.0,
-                            humidity as f32 / 10.0,
-                            pressure as f32 / 10.0,
-                        )
+                        // One datagram, per_dg records, one shared instant.
+                        format!("records={per_dg} (channels 0..={})", per_dg - 1)
                     }
 
                     MessageKind::Number => {

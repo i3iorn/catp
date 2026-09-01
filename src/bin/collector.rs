@@ -62,7 +62,7 @@ fn render(r: &Record) -> String {
             let f = |i: usize| i16::from_be_bytes([r.body[i], r.body[i + 1]]);
             let u = |i: usize| u16::from_be_bytes([r.body[i], r.body[i + 1]]);
             format!(
-                "seq={:<5} temp={:.2}C humidity={:.1}% pressure={:.1}hPa battery={}% rssi={}dBm",
+                "ch={:<3} temp={:.2}C humidity={:.1}% pressure={:.1}hPa battery={}% rssi={}dBm",
                 u(0),
                 f(2) as f32 / 100.0,
                 u(4) as f32 / 10.0,
