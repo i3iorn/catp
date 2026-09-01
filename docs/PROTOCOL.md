@@ -1697,7 +1697,7 @@ A node MUST accept a TIME_ANNOUNCE only when all of the following hold:
     The MAC verifies under the collector-to-node time_key, using direction
     0x01.
     asserted_time is strictly greater than last_epoch * 128, where
-    last_epoch is the persisted value of Section 10.5.
+    last_epoch is the persisted value of Section 10.4.
 
 On acceptance the node sets its clock to asserted_time, updates last_epoch
 to floor(asserted_time / 128), persists it, and marks its clock valid. It MUST
@@ -1715,7 +1715,7 @@ is sufficient even if its timestamp is less than a previously received
 announcement that was never accepted. The protocol requirement is solely that
 the accepted time lie strictly beyond the persisted last_epoch floor.
 
-Note that Section 10.5's transmit rule composes with this: having set
+Note that Section 10.4's transmit rule composes with this: having set
 last_epoch from asserted_time, the node still waits for the epoch to advance
 past it before its first transmission.
 ### 11.6 Collector behaviour
