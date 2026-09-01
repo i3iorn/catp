@@ -1,0 +1,177 @@
+# CATP design rationale
+
+**Non-normative.** Nothing here constrains an implementation. Every rule an
+implementer must follow is in [PROTOCOL.md](PROTOCOL.md); this document explains
+why some of the less obvious ones are the way they are.
+
+It exists because the two audiences differ. Someone writing an implementation
+needs the rules and needs to be sure they have not missed one. Someone deciding
+whether the design is sound, or proposing to change it, needs the arguments.
+Interleaving them served neither.
+
+Each entry names the section it justifies.
+
+---
+
+## R1. Why fragmentation is worse here than usual
+
+Justifies [PROTOCOL.md](PROTOCOL.md) §3.1.
+
+If a datagram is fragmented, loss of any single fragment destroys the whole
+datagram; CATP cannot authenticate or use a partial payload. A datagram split
+into `f` fragments on a link with per-packet loss `p` fails with probability
+approximately `1 - (1-p)^f`, so three fragments on a 2% link fail roughly 6% of
+the time.
+
+This compounds with batching. A fragmented 20-record `MESSAGE` converts a 2%
+link into roughly a 6% chance of losing 20 consecutive records. Fragmentation and
+batching multiply each other's loss amplification, which makes staying inside
+`max_datagram_size` a correctness concern rather than an efficiency one.
+
+---
+
+## 4. Datagram format
+
+```
+ 0                   1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+| ver |msg_type | cipher_id|epoch_low|  reserved | datagram_offset
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+        datagram_offset (cont.)        |         sender_id
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+                sender_id (cont.)      |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+  followed by:  payload (variable)  ||  MAC tag (length per cipher)
+```
+
+The header is 9 bytes. All multi-byte integers are network byte order
+(big-endian).
+
+---
+
+## R2. Why the offset is in the header
+
+Justifies [PROTOCOL.md](PROTOCOL.md) §4.1.
+
+Every datagram needs a position within its epoch: it is the replay key
+(Section 10), the nonce source for nonce-requiring suites (Section 7.2), and the
+timestamp a receiver records against the reading.
+
+Two things put it in the header rather than in the payload. `NUMBER` (Section 6.3) carries a bare
+numeric literal with no record structure to hold an offset, and would otherwise
+have needed the same payload-prefix workaround control messages used. And
+because the offset was read from the payload, a receiver had to parse framing
+before it could check replay, inverting the natural verification order
+(Section 7.4).
+
+In the header, every message type has an offset in the same place, readable
+before the payload is touched, and Section 7.4 can check replay immediately
+after the MAC rather than waiting for the payload to be parsed.
+
+The cost is 3 bytes on every datagram, against 2 bytes saved on every record
+(Section 6.4). A single-record datagram is 1 byte larger; ten records are 17
+bytes smaller and fifty are 97 bytes smaller. The trade favours the batching
+the protocol wants to encourage.
+
+---
+
+## R3. Why ignoring is safe here
+
+Justifies [PROTOCOL.md](PROTOCOL.md) §4.2.
+
+Must-ignore bits are normally a downgrade hazard: if an attacker can set a bit
+that a receiver silently disregards, they can strip a security signal. That
+does not apply here. The reserved bits sit inside the MAC scope (Section 7.3),
+so an attacker cannot set, clear, or flip them without possessing the key. The
+only party that can populate them is the legitimate sender, which is precisely
+the party an extension is a message from.
+
+What is lost is the free malformed-traffic check the old must-reject rule
+provided, and the guarantee that an unaware receiver fails loudly rather than
+quietly. The second is the real cost, and it constrains what may be built here.
+
+---
+
+## R4. What NUMBER costs against an equivalent MESSAGE
+
+Justifies [PROTOCOL.md](PROTOCOL.md) §6.3.
+
+At 41 bytes of IPv4 overhead, a `NUMBER` datagram carrying `23.5` is 45 bytes on
+the wire. The equivalent `MESSAGE` — a 3-byte record header plus a 2-byte
+fixed-point body — is 46, and requires a provisioned layout at both ends.
+
+ASCII is not the most compact encoding of a number, and this document does not
+claim otherwise: `23.5` costs 4 bytes where a scaled `int16` costs 2. What
+`NUMBER` removes is the 3-byte record header and the entire layout registry, and
+for a single short reading that trade comes out ahead. For long values, high
+precision, or several fields, it does not, and `MESSAGE` is the better choice.
+
+---
+
+## R5. Why cipher 0x03 requires a per-datagram nonce
+
+Justifies [PROTOCOL.md](PROTOCOL.md) §7.2.
+
+Poly1305 is a one-time authenticator. Two distinct messages authenticated under
+the same Poly1305 key allow an attacker to solve for the key and forge
+arbitrarily, so applying it directly as `MAC(epoch_key, message)` across an
+epoch — up to 65,536 datagrams under one key — would be a total break rather
+than a weakening.
+
+The RFC 8439 construction avoids this by deriving a fresh one-time Poly1305 key
+from ChaCha20 keyed by `(epoch_key, nonce)`. Its safety therefore rests entirely
+on `(key, nonce)` never repeating. CATP already guarantees this without adding a
+wire field: `epoch_key` is unique per `(device_secret, epoch_id, direction)` by
+Section 9.2, and `datagram_offset` is unique within an epoch by Section 10.1.
+The nonce is the offset, and the existing rules make it a nonce.
+
+This is the reason Section 10.1's prohibition on offset reuse is a correctness
+requirement rather than a replay-hygiene preference. Under `cipher_id` `0x01`,
+`0x02`, or `0x04`, a reused offset costs replay protection. Under `0x03`, it
+costs the key.
+
+Note that the clock supplies this uniqueness for free across a restart, which a
+counter did not: see Section 10.4.
+
+---
+
+## R6. One field, three jobs
+
+Justifies [PROTOCOL.md](PROTOCOL.md) §10.1.
+
+`datagram_offset` serves as timestamp, sequence number, and nonce source at
+once. It is monotonic within an epoch, unique per tick, and unlike a
+free-running counter it means something.
+
+Carrying one field rather than a counter and a timestamp separately buys three
+things:
+
+**Bytes off every datagram**, since one field serves as timestamp, sequence
+number, and nonce source rather than three.
+
+**Restart safety for free.** A counter restarts at zero when a device reboots,
+reusing tuples it has already sent, and closing that would require a
+non-volatile write per epoch. A clock does not rewind, so a rebooted sender's
+offsets are naturally beyond any it has used. See Section 10.4.
+
+**A replay window measured in time.** A bitmap of N offsets covers N ticks of
+wall clock regardless of the sender's rate, rather than N datagrams whose span
+depends on it. Section 10.2 states the window as a duration for this reason.
+
+**A total order across datagrams**, since no two datagrams from one sender share
+an offset within an epoch. `(epoch_id, datagram_offset)` therefore sorts a
+sender's traffic exactly, which the per-record offsets it replaced could not do
+(Section 6.4.5).
+
+The cost is that the rate ceiling becomes a **pacing** constraint rather than a
+budget. A counter permitted a burst of any size so long as the per-epoch total
+stayed within 65,536; the offset permits no two datagrams in the same 244
+microsecond tick, however small the burst. In practice a sender that would
+violate this is one emitting hundreds of datagrams per second, which the former
+`max_rate` guidance already discouraged — but the constraint is now structural
+rather than advisory, and it is enforced by the receiver rather than trusted to
+the sender.
+
+---

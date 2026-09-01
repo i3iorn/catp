@@ -32,6 +32,7 @@ If your telemetry content is itself sensitive, CATP is the wrong protocol. See
 | | |
 |---|---|
 | [`docs/PROTOCOL.md`](docs/PROTOCOL.md) | The specification. Version 1, draft. |
+| [`docs/RATIONALE.md`](docs/RATIONALE.md) | Non-normative. Why the less obvious rules are the way they are. |
 | [`docs/test-vectors.txt`](docs/test-vectors.txt) | Frozen conformance vectors (§14.1). The authority a second implementation checks itself against. |
 
 ## Reference implementation
