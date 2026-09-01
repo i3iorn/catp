@@ -49,6 +49,14 @@ pub const RECORD_HEADER_LEN: usize = 3;
 /// Longest legal `NUMBER` payload (PROTOCOL.md 6.3).
 pub const MAX_NUMBER_LEN: usize = 32;
 
+/// `schema_version` meaning "no field definition is claimed for this body"
+/// (PROTOCOL.md 6.4.2.2).
+///
+/// Reserved under every `format`. A receiver still has to hold
+/// `(format, SCHEMA_UNSTRUCTURED)` to accept such a record -- the value says
+/// the body has no layout, not that the layout agreement does not apply.
+pub const SCHEMA_UNSTRUCTURED: u8 = 0xFF;
+
 /// Conservative IPv4 `max_datagram_size` (PROTOCOL.md 3.1).
 pub const MAX_DATAGRAM_IPV4: usize = 512;
 

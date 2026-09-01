@@ -56,7 +56,7 @@ fn usecase_single_value_node() {
     assert_eq!(wire_total, expected);
 }
 
-/// A multi-sensor node: eight channels sampled in one pass, batched into one
+/// A multi-sensor node: eight sensors sampled in one pass, batched into one
 /// MESSAGE. This is the case PROTOCOL.md 6.4.1 is designed for -- the readings
 /// genuinely share a capture instant, so one timestamp is correct.
 #[test]
@@ -66,10 +66,12 @@ fn usecase_multisensor_batch() {
     let epoch = epoch_id_at(1_700_000_000);
 
     let records: Vec<Record> = (0..8u16)
-        .map(|ch| {
+        .map(|i| {
+            // Sensor position and reading, both deployment-defined: the
+            // protocol names neither (PROTOCOL.md 4.2, 6.4.2).
             let mut b = Vec::new();
-            b.push(ch as u8);
-            b.extend_from_slice(&(2000 + ch * 10).to_be_bytes());
+            b.push(i as u8);
+            b.extend_from_slice(&(2000 + i * 10).to_be_bytes());
             rec(&b)
         })
         .collect();
@@ -490,4 +492,49 @@ fn offset_extremes_round_trip() {
     }
     // Beyond the field is a construction error, not a silent truncation.
     assert!(Datagram::number(CipherId::HmacSha256T32, NODE, epoch, TICKS_PER_EPOCH, "1").is_err());
+}
+
+/// `UNSTRUCTURED` (PROTOCOL.md 6.4.2.2) is a reserved meaning, not a standing
+/// permission. A receiver that has not been provisioned with the pair discards
+/// the record like any other layout it does not hold; provisioning it is what
+/// makes the record acceptable. Were `0xFF` accepted unconditionally, an
+/// authenticated peer could sidestep the layout agreement by relabelling.
+#[test]
+fn unstructured_still_has_to_be_provisioned() {
+    let epoch = epoch_id_at(1_700_000_000);
+
+    let build = || {
+        let dg = Datagram::data(
+            MsgType::Message,
+            CipherId::HmacSha256T32,
+            NODE,
+            epoch,
+            700,
+            vec![
+                rec(b"structured"),
+                Record::new(Format::None, SCHEMA_UNSTRUCTURED, b"opaque".to_vec()),
+            ],
+        )
+        .unwrap();
+        dg.encode(&secret(1), epoch, Direction::NodeToCollector, MAX_DATAGRAM_IPV4).unwrap()
+    };
+
+    // Not provisioned: the unstructured record is skipped, the rest survives.
+    let mut col = Collector::new();
+    col.provision(cfg(NODE, 1, CipherId::HmacSha256T32));
+    let acc = col.accept(&build(), epoch, Direction::NodeToCollector).unwrap();
+    assert_eq!(acc.datagram.records.len(), 1);
+    assert_eq!(acc.skipped.len(), 1);
+    assert_eq!(acc.skipped[0].schema_version, SCHEMA_UNSTRUCTURED);
+
+    // Provisioned: both records are delivered, sharing one instant.
+    let mut col = Collector::new();
+    let mut c = cfg(NODE, 1, CipherId::HmacSha256T32);
+    c.layouts.push((Format::None as u8, SCHEMA_UNSTRUCTURED));
+    col.provision(c);
+    let acc = col.accept(&build(), epoch, Direction::NodeToCollector).unwrap();
+    assert_eq!(acc.datagram.records.len(), 2);
+    assert!(acc.skipped.is_empty());
+    assert_eq!(acc.datagram.records[1].body, b"opaque");
+    assert_eq!(acc.datagram_offset, 700);
 }
