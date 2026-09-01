@@ -31,43 +31,6 @@ fn now() -> (u64, u32) {
     (d.as_secs(), d.subsec_nanos())
 }
 
-/// Sender-side offset state for the current epoch (PROTOCOL.md 10.3, 10.4).
-struct Pacer {
-    epoch: u32,
-    last_offset: Option<u32>,
-}
-
-impl Pacer {
-    fn new() -> Self {
-        Self {
-            epoch: 0,
-            last_offset: None,
-        }
-    }
-
-    /// Claim an offset for a datagram to be sent now, or explain why not.
-    ///
-    /// Enforces strict increase, covering both a repeated clock tick and a
-    /// backward clock step without requiring non-volatile state.
-    fn claim(&mut self, secs: u64, nanos: u32) -> Result<(u32, u32), Error> {
-        let epoch = epoch_id_at(secs);
-        let offset = epoch_offset_at(secs, nanos);
-
-        if epoch != self.epoch {
-            self.epoch = epoch;
-            self.last_offset = None;
-        }
-
-        match self.last_offset {
-            Some(prev) if offset <= prev => Err(Error::OffsetReuse(offset)),
-            _ => {
-                self.last_offset = Some(offset);
-                Ok((epoch, offset))
-            }
-        }
-    }
-}
-
 #[derive(Clone, Copy)]
 enum MessageKind {
     Message,
