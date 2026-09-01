@@ -18,6 +18,8 @@ const CIPHER: CipherId = CipherId::HmacSha256T32;
 const SENSOR_SCHEMA: u8 = 1;
 const EVENT_SCHEMA: u8 = 2;
 const ALARM_SCHEMA: u8 = 3;
+// PROTOCOL.md 6.4.2.2: reserved, means "no field definition is claimed".
+const UNSTRUCTURED: u8 = SCHEMA_UNSTRUCTURED;
 
 fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).expect("clock before 1970").as_secs()
@@ -47,6 +49,24 @@ fn label(mt: MsgType) -> &'static str {
     }
 }
 
+/// Render arbitrary octets as one printable string, losslessly.
+///
+/// Printable ASCII passes through; everything else becomes `\xNN`. This is
+/// the most a receiver may do with an `UNSTRUCTURED` body (PROTOCOL.md
+/// 6.4.2.2) -- hand the bytes back without imposing a reading on them. It is
+/// deliberately not a decode: no length is assumed, no field is named.
+fn escape(body: &[u8]) -> String {
+    let mut out = String::with_capacity(body.len());
+    for &b in body {
+        match b {
+            b'\\' => out.push_str("\\\\"),
+            0x20..=0x7E => out.push(b as char),
+            _ => out.push_str(&format!("\\x{b:02X}")),
+        }
+    }
+    out
+}
+
 /// Render a record body according to the layout its `(format, schema_version)`
 /// names.
 ///
@@ -57,18 +77,22 @@ fn label(mt: MsgType) -> &'static str {
 fn render(r: &Record) -> String {
     const NONE: u8 = Format::None as u8;
     match (r.format, r.schema_version) {
-        // Sensor tuple: seq, temp, humidity, pressure, battery, rssi.
-        (NONE, SENSOR_SCHEMA) if r.body.len() >= 12 => {
+        // No layout is claimed, so no layout may be applied: show the octets
+        // and nothing else (PROTOCOL.md 6.4.2.2). Note that this arm is
+        // reached only because the peer was provisioned with the pair --
+        // 0xFF is a reserved meaning, not a bypass of the layout agreement.
+        (_, UNSTRUCTURED) => format!("unstructured({:>3}B) \"{}\"", r.body.len(), escape(&r.body)),
+        // Sensor tuple: temp, humidity, pressure, battery, rssi.
+        (NONE, SENSOR_SCHEMA) if r.body.len() >= 10 => {
             let f = |i: usize| i16::from_be_bytes([r.body[i], r.body[i + 1]]);
             let u = |i: usize| u16::from_be_bytes([r.body[i], r.body[i + 1]]);
             format!(
-                "ch={:<3} temp={:.2}C humidity={:.1}% pressure={:.1}hPa battery={}% rssi={}dBm",
-                u(0),
-                f(2) as f32 / 100.0,
+                "temp={:.2}C humidity={:.1}% pressure={:.1}hPa battery={}% rssi={}dBm",
+                f(0) as f32 / 100.0,
+                u(2) as f32 / 10.0,
                 u(4) as f32 / 10.0,
-                u(6) as f32 / 10.0,
-                u(8),
-                f(10)
+                u(6),
+                f(8)
             )
         }
         // Event: seq, then a UTF-8 name.
@@ -112,13 +136,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             (Format::None as u8, SENSOR_SCHEMA),
             (Format::None as u8, EVENT_SCHEMA),
             (Format::None as u8, ALARM_SCHEMA),
+            // Without this pair the unstructured records are discarded
+            // unread, exactly like any other layout the receiver does not
+            // hold (PROTOCOL.md 6.4.2.2).
+            (Format::None as u8, UNSTRUCTURED),
         ],
     });
 
     let sock = UdpSocket::bind(&bind)?;
     eprintln!(
         "catp-collector on {bind}  sender_id=0x{SENDER_ID:08X} cipher=0x{:02X} \
-         layout=(NONE,v{SENSOR_SCHEMA})",
+         layouts=(NONE,v{SENSOR_SCHEMA}/v{EVENT_SCHEMA}/v{ALARM_SCHEMA}/v{UNSTRUCTURED})",
         CIPHER as u8
     );
 
@@ -225,11 +253,11 @@ mod tests {
         // can send a body shorter than the layout expects. That must not be a
         // crash: a post-authentication panic bypasses every pre-auth cost bound
         // Section 12.5 establishes.
-        for n in 1..12 {
+        for n in 1..10 {
             let out = render(&rec(SENSOR_SCHEMA, n));
             assert!(out.contains("MALFORMED"), "len {n} gave {out:?}");
         }
-        assert!(render(&rec(SENSOR_SCHEMA, 12)).contains("temp="));
+        assert!(render(&rec(SENSOR_SCHEMA, 10)).contains("temp="));
         for sv in [EVENT_SCHEMA, ALARM_SCHEMA] {
             for n in 1..3 {
                 assert!(render(&rec(sv, n)).contains("MALFORMED"), "sv={sv} len={n}");
@@ -242,6 +270,36 @@ mod tests {
         let out = render(&rec(99, 8));
         assert!(out.contains("unhandled layout"), "{out}");
         assert!(out.contains("schema_version=99"), "{out}");
+    }
+
+    #[test]
+    fn unstructured_is_shown_not_decoded() {
+        // Same bytes a sensor record would carry. Under UNSTRUCTURED the
+        // collector must not read fields out of them (PROTOCOL.md 6.4.2.2).
+        let body = vec![0x09, 0x1D, 0x01, 0x8A, 0x27, 0xF5, 0x00, 0x3C, 0xFF, 0xA2];
+        let out = render(&Record::new(Format::None, UNSTRUCTURED, body));
+        assert!(out.starts_with("unstructured("), "{out}");
+        assert!(!out.contains("temp="), "{out}");
+    }
+
+    #[test]
+    fn escape_is_lossless_and_printable() {
+        // Every byte survives as printable characters, so an unstructured
+        // body cannot smuggle control characters into the operator's terminal.
+        let all: Vec<u8> = (0..=255u8).collect();
+        let out = escape(&all);
+        assert!(out.chars().all(|c| (' '..='~').contains(&c)), "{out}");
+        assert!(out.contains("\\x00") && out.contains("\\xFF"));
+        // A literal backslash is escaped rather than read as an escape.
+        assert_eq!(escape(b"a\\x41"), "a\\\\x41");
+    }
+
+    #[test]
+    fn unstructured_under_any_format_is_never_decoded() {
+        for f in [Format::None, Format::Cbor] {
+            let out = render(&Record::new(f, UNSTRUCTURED, vec![1, 2, 3]));
+            assert!(out.starts_with("unstructured("), "{f:?} gave {out}");
+        }
     }
 
     #[test]

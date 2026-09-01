@@ -615,10 +615,13 @@ field definition to hand it.
 
 - `0x00` is reserved and MUST NOT be transmitted, so a zero-filled buffer does
   not decode as a valid record.
-- Values `0x01`-`0xFF` are assigned by the deploying organization, independently
+- `0xFF` is reserved as `UNSTRUCTURED` and carries the same meaning under every
+  `format` (Section 6.4.2.2).
+- Values `0x01`-`0xFE` are assigned by the deploying organization, independently
   per `format`.
 - A receiver MUST discard a record whose `(format, schema_version)` pair it holds
-  no definition for, after MAC verification (Section 6.4.4).
+  no definition for, after MAC verification (Section 6.4.4). This holds for
+  `UNSTRUCTURED` too: `0xFF` is a reserved meaning, not a standing permission.
 - Any change to field layout, field widths, field order, or units MUST be
   published as a new `schema_version`. Values MUST NOT be redefined once
   deployed.
@@ -640,9 +643,31 @@ Note that `schema_version` is meaningful even under self-describing encodings.
 field means or in what units, and `PROTOBUF` requires the matching `.proto` to
 interpret field numbers at all. Only the pair identifies a layout.
 
-256 versions per format is ample for a field that increments when a layout
-changes. A deployment approaching exhaustion has revised one layout 255 times
+254 versions per format is ample for a field that increments when a layout
+changes. A deployment approaching exhaustion has revised one layout 253 times
 and should allocate a second `format` value or reconsider its schema discipline.
+
+##### 6.4.2.2 `UNSTRUCTURED` (`0xFF`)
+
+`schema_version` `0xFF` means the sender claims no field definition for the
+body. A receiver holding this pair MAY store, forward, or display the body, and
+MUST NOT interpret it as fields.
+
+`UNSTRUCTURED` is not an exemption from provisioning. A receiver MUST hold
+`(format, 0xFF)` before accepting such a record, exactly as for any other pair,
+and MUST discard it otherwise. Were `0xFF` accepted unconditionally, any
+authenticated peer could sidestep the layout agreement by relabelling, and a
+receiver's layout list would no longer describe what it accepts.
+
+A sender MUST NOT use `0xFF` for a body that has a field definition. The value
+states that no such definition exists, not that one exists and is being
+withheld: a deployment holding a layout publishes it as a version in
+`0x01`-`0xFE`, so that a receiver can check what it reads. Free-form text with
+no defined fields, carrying its meaning to a human rather than to a parser, has
+no definition to publish and is the case `0xFF` is for.
+
+See [RATIONALE.md](RATIONALE.md) R7 for why the value is reserved rather than
+left to each deployment, and for what it does not protect.
 
 #### 6.4.3 size
 

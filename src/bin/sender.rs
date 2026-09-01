@@ -1,9 +1,9 @@
 //! CATP reference sender: emits varied synthetic telemetry.
 //!
-//! Usage: catp-sender [collector_addr] [rate_hz] [records_per_datagram]
+//! Usage: catp-sender [collector_addr] [rate_hz]
 //!
 //! Exercises several CATP message/framing paths against a live collector:
-//!   - MESSAGE: batched synthetic sensor records
+//!   - MESSAGE: one observation carried twice, structured and unstructured
 //!   - NUMBER:  bare numeric literal
 //!   - EVENT:   discrete device events
 //!   - ALARM:   varying-severity operational alarms
@@ -28,6 +28,9 @@ const CIPHER: CipherId = CipherId::HmacSha256T32;
 const SENSOR_SCHEMA: u8 = 1;
 const EVENT_SCHEMA: u8 = 2;
 const ALARM_SCHEMA: u8 = 3;
+// PROTOCOL.md 6.4.2.2: reserved, means "no field definition is claimed".
+// Deployment-assigned values stop at 0xFE.
+const UNSTRUCTURED: u8 = SCHEMA_UNSTRUCTURED;
 
 fn now() -> (u64, u32) {
     let d = SystemTime::now()
@@ -106,32 +109,53 @@ fn sensor_values(seq: u32) -> (i16, u16, u16, u16, i16) {
     (temp, humidity, pressure, battery, signal)
 }
 
-/// Build one batch: `channels` sensors read in a single pass.
+/// One observation, rendered as text with no declared layout.
 ///
-/// PROTOCOL.md 6.4.1 gives every record in a datagram the same capture
-/// instant, so a batch must be several readings taken *together* -- not one
-/// sensor sampled repeatedly, which would be a time series wearing a single
-/// timestamp. Each record here is a different channel of the same
-/// multi-sensor node, which is the case the single-instant rule is for.
-fn make_records(seq: u32, channels: usize) -> Vec<Record> {
-    (0..channels)
-        .map(|ch| {
-            // Readings derive from the channel, not from a rolling sample
-            // number, so the batch is a snapshot rather than a series.
-            let (temp, humidity, pressure, battery, signal) =
-                sensor_values(seq ^ ((ch as u32 + 1) << 24));
+/// This is what PROTOCOL.md 6.4.2.2 exists for: the bytes carry structure a
+/// human can read, but the sender declares no field definition, so no receiver
+/// is entitled to parse them.
+fn reading_text(v: (i16, u16, u16, u16, i16)) -> String {
+    let (temp, humidity, pressure, battery, signal) = v;
 
-            let mut body = Vec::with_capacity(12);
-            body.extend_from_slice(&(ch as u16).to_be_bytes());
-            body.extend_from_slice(&temp.to_be_bytes());
-            body.extend_from_slice(&humidity.to_be_bytes());
-            body.extend_from_slice(&pressure.to_be_bytes());
-            body.extend_from_slice(&battery.to_be_bytes());
-            body.extend_from_slice(&signal.to_be_bytes());
+    format!(
+        "temp={:.2}C humidity={:.1}% pressure={:.1}hPa battery={battery}% rssi={signal}dBm",
+        temp as f32 / 100.0,
+        humidity as f32 / 10.0,
+        pressure as f32 / 10.0,
+    )
+}
 
-            Record::new(Format::None, SENSOR_SCHEMA, body)
-        })
-        .collect()
+/// Build one MESSAGE batch: a single observation carried twice, once under a
+/// layout the collector can decode and once as opaque bytes.
+///
+/// PROTOCOL.md 6.4.1 gives every record in a datagram the same capture instant,
+/// so a batch must be readings taken *together* -- not one sensor sampled
+/// repeatedly, which would be a time series wearing a single timestamp. These
+/// two records are one observation, so the shared instant is correct by
+/// construction.
+///
+/// The pair is also what 6.4.2.1 and 6.4.2.2 look like side by side. The first
+/// record claims layout `SENSOR_SCHEMA`, and a receiver holding that definition
+/// reads named fields from it. The second claims `UNSTRUCTURED`, and a receiver
+/// may only hand the bytes back.
+fn make_records(seq: u32) -> Vec<Record> {
+    // Sampled once, so the two records describe the same observation by
+    // construction rather than by both happening to be deterministic.
+    let values = sensor_values(seq);
+    let (temp, humidity, pressure, battery, signal) = values;
+
+    // Structured: packed big-endian fields, layout defined by SENSOR_SCHEMA.
+    let mut packed = Vec::with_capacity(10);
+    packed.extend_from_slice(&temp.to_be_bytes());
+    packed.extend_from_slice(&humidity.to_be_bytes());
+    packed.extend_from_slice(&pressure.to_be_bytes());
+    packed.extend_from_slice(&battery.to_be_bytes());
+    packed.extend_from_slice(&signal.to_be_bytes());
+
+    vec![
+        Record::new(Format::None, SENSOR_SCHEMA, packed),
+        Record::new(Format::None, UNSTRUCTURED, reading_text(values).into_bytes()),
+    ]
 }
 
 fn make_number(seq: u32) -> String {
@@ -176,11 +200,10 @@ fn make_datagram(
     seq: u32,
     epoch: u32,
     offset: u32,
-    per_dg: usize,
 ) -> Result<Datagram, Error> {
     match kind {
         MessageKind::Message => {
-            let records = make_records(seq, per_dg);
+            let records = make_records(seq);
 
             Datagram::data(
                 MsgType::Message,
@@ -260,19 +283,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .transpose()?
         .unwrap_or(4);
 
-    let per_dg: usize = args
-        .get(3)
-        .map(|s| s.parse())
-        .transpose()?
-        .unwrap_or(3);
-
     let sock = UdpSocket::bind("0.0.0.0:0")?;
     let secret = DeviceSecret(SECRET);
     let mut pacer = Pacer::new();
 
     eprintln!(
         "catp-sender -> {addr}  sender_id=0x{SENDER_ID:08X} cipher=0x{:02X} \
-         {rate_hz} datagram/s x {per_dg} records",
+         {rate_hz} datagram/s",
         CIPHER as u8
     );
 
@@ -296,7 +313,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let kind = choose_kind(seq);
 
-        let dg = match make_datagram(kind, seq, epoch, offset, per_dg) {
+        let dg = match make_datagram(kind, seq, epoch, offset) {
             Ok(dg) => dg,
             Err(e) => {
                 eprintln!("datagram construction failed: {e}");
@@ -315,8 +332,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let detail = match kind {
                     MessageKind::Message => {
-                        // One datagram, per_dg records, one shared instant.
-                        format!("records={per_dg} (channels 0..={})", per_dg - 1)
+                        // One datagram, two records, one shared instant: the
+                        // same observation structured and unstructured.
+                        format!(
+                            "records=2 (v{SENSOR_SCHEMA} structured + \
+                             v{UNSTRUCTURED} unstructured) {}",
+                            reading_text(sensor_values(seq))
+                        )
                     }
 
                     MessageKind::Number => {

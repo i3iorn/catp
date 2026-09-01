@@ -61,14 +61,22 @@ cargo run --bin catp-collector 127.0.0.1:9999
 Point a sender at it — it emits MESSAGE, NUMBER, EVENT, and ALARM traffic:
 
 ```bash
-cargo run --bin catp-sender 127.0.0.1:9999 4 3
+cargo run --bin catp-sender 127.0.0.1:9999 4
 ```
 
 ```
-127.0.0.1:52764  t=1788271313.368  MESSAGE  seq=1  temp=24.52C humidity=38.3% ...
-127.0.0.1:52764  t=1788271313.702  EVENT    seq=3  configuration_changed
-127.0.0.1:52764  t=1788271314.035  ALARM    seq=5  [CRITICAL] sensor_failure
+127.0.0.1:46229  t=1788274214.060  MESSAGE  temp=24.52C humidity=38.3% pressure=1012.3hPa battery=89% rssi=-68dBm
+127.0.0.1:46229  t=1788274214.060  MESSAGE  unstructured( 69B) "temp=24.52C humidity=38.3% pressure=1012.3hPa battery=89% rssi=-68dBm"
+127.0.0.1:46229  t=1788274214.561  EVENT    seq=3     configuration_changed
+127.0.0.1:46229  t=1788274215.062  ALARM    seq=5     [CRITICAL] sensor_failure
+127.0.0.1:46229  t=1788274215.813  NUMBER   20.38
 ```
+
+Each MESSAGE carries one observation as two records: once under a layout the
+collector holds a definition for, and once as `schema_version` `0xFF`
+(`UNSTRUCTURED`, §6.4.2.2), where the sender claims no layout and the collector
+may only hand the octets back. Both records share the datagram's one capture
+instant, which is what §6.4.1 requires of a batch.
 
 ### Tests
 

@@ -175,3 +175,40 @@ rather than advisory, and it is enforced by the receiver rather than trusted to
 the sender.
 
 ---
+
+## R7. Why `UNSTRUCTURED` is reserved rather than deployment-assigned
+
+Justifies [PROTOCOL.md](PROTOCOL.md) §6.4.2.2.
+
+`schema_version` is mandatory, and some payloads genuinely have no layout to
+name: log lines, a relayed third-party blob, a body still being designed. Such a
+deployment could pick any value out of `0x01`-`0xFE` and simply define it to
+mean "opaque", which is what makes the reservation look unnecessary.
+
+The objection to that is not correctness but legibility. A deployment-assigned
+value declaring "no layout" is indistinguishable, on the wire and in a capture,
+from one declaring a real layout. Every receiver and every operator then has to
+consult out-of-band documentation to learn that `0x07` in this fleet means
+"do not parse this". Reserving one value makes the absence of a layout a
+property of the record rather than of the paperwork, which is what keeps the
+rest of the range meaningful: `0x01`-`0xFE` are claims, and a claim can be
+checked.
+
+The reservation costs one value out of 255, in a field that increments when a
+layout changes, for a deployment that has already revised one layout 253 times.
+
+**What it does not protect.** The protocol cannot see inside an `UNSTRUCTURED`
+body and therefore cannot version what is in there. A deployment that grows an
+ad-hoc structure inside such a body and later reorders two fields reintroduces
+exactly the silent misread §6.4.2.1 exists to prevent, one layer down, where
+`schema_version` can no longer catch it. The failure is not new -- it is the
+pre-`schema_version` failure, reachable by declining to use the field. This is
+the standing argument against the value existing at all: an escape hatch is the
+path of least resistance, and a deployment that defaults to `0xFF` never
+versions anything. §6.4.2.2 answers it with a MUST NOT rather than by
+withholding the value, on the grounds that a deployment determined to skip
+layout discipline can already pin `0x01` forever. The specification can make the
+label available and require it be resolvable; it cannot make a deployment
+honest.
+
+---
