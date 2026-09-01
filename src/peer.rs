@@ -148,17 +148,58 @@ pub struct NodeClock {
     last_epoch: u32,
     /// Seconds to add to the platform clock once time has been recovered.
     correction: i64,
+    /// Earliest monotonic instant at which another `TIME_REQUEST` may be sent.
+    next_request_at: i64,
+    /// Current backoff interval, doubling per attempt up to the ceiling.
+    request_backoff: i64,
 }
+
+/// First `TIME_REQUEST` retry interval, seconds (PROTOCOL.md 11.3).
+pub const TIME_REQUEST_BASE_SECS: i64 = 2;
+/// Ceiling for `TIME_REQUEST` backoff, seconds.
+pub const TIME_REQUEST_MAX_SECS: i64 = 3600;
 
 impl NodeClock {
     /// A node that booted with no usable clock.
     pub fn clockless(last_epoch: u32) -> Self {
-        Self { valid: false, last_epoch, correction: 0 }
+        Self {
+            valid: false,
+            last_epoch,
+            correction: 0,
+            next_request_at: i64::MIN,
+            request_backoff: TIME_REQUEST_BASE_SECS,
+        }
     }
 
     /// A node with an authenticated time source.
     pub fn synced(last_epoch: u32) -> Self {
-        Self { valid: true, last_epoch, correction: 0 }
+        Self {
+            valid: true,
+            last_epoch,
+            correction: 0,
+            next_request_at: i64::MIN,
+            request_backoff: TIME_REQUEST_BASE_SECS,
+        }
+    }
+
+    /// May the node emit a `TIME_REQUEST` now (PROTOCOL.md 11.3)?
+    ///
+    /// False once the clock is valid — a node MUST send requests only while it
+    /// has no clock — and false while the backoff interval has not elapsed.
+    /// `now_monotonic` must come from a monotonic source, since the whole point
+    /// is that the wall clock is not yet trustworthy.
+    pub fn may_request_time(&self, now_monotonic: i64) -> bool {
+        !self.valid && now_monotonic >= self.next_request_at
+    }
+
+    /// Record that a `TIME_REQUEST` was sent, and double the backoff.
+    ///
+    /// The spec requires only that a node not transmit continuously; doubling
+    /// from 2 s to a 1 h ceiling keeps a node that never hears back from
+    /// costing its collector anything measurable.
+    pub fn record_time_request(&mut self, now_monotonic: i64) {
+        self.next_request_at = now_monotonic.saturating_add(self.request_backoff);
+        self.request_backoff = (self.request_backoff * 2).min(TIME_REQUEST_MAX_SECS);
     }
 
     pub fn is_valid(&self) -> bool {
@@ -193,6 +234,7 @@ impl NodeClock {
         self.correction = asserted - raw_now;
         self.last_epoch = (asserted / EPOCH_SECS as i64) as u32;
         self.valid = true;
+        self.request_backoff = TIME_REQUEST_BASE_SECS;
         Ok(())
     }
 
@@ -332,6 +374,41 @@ mod tests {
             Error::ClockAlreadyValid
         );
         assert_eq!(clk.now(0).unwrap(), t);
+    }
+
+    #[test]
+    fn time_request_backoff_grows_and_stops_when_clock_is_set() {
+        let mut clk = NodeClock::clockless(1000);
+        // First request is immediate.
+        assert!(clk.may_request_time(0));
+        clk.record_time_request(0);
+        assert!(!clk.may_request_time(0), "must not transmit continuously");
+        assert!(!clk.may_request_time(1));
+        assert!(clk.may_request_time(TIME_REQUEST_BASE_SECS));
+
+        // Backoff doubles.
+        let mut t = TIME_REQUEST_BASE_SECS;
+        clk.record_time_request(t);
+        assert!(!clk.may_request_time(t + TIME_REQUEST_BASE_SECS));
+        assert!(clk.may_request_time(t + TIME_REQUEST_BASE_SECS * 2));
+
+        // And is capped.
+        for _ in 0..40 {
+            t += TIME_REQUEST_MAX_SECS;
+            clk.record_time_request(t);
+        }
+        assert!(clk.may_request_time(t + TIME_REQUEST_MAX_SECS));
+
+        // Once time is recovered the node stops asking entirely.
+        clk.accept_time_announce(1000 * EPOCH_SECS as i64 + 5000, 0).unwrap();
+        assert!(!clk.may_request_time(i64::MAX - 1));
+    }
+
+    #[test]
+    fn synced_node_never_requests_time() {
+        let clk = NodeClock::synced(1000);
+        assert!(!clk.may_request_time(0));
+        assert!(!clk.may_request_time(i64::MAX - 1));
     }
 
     #[test]

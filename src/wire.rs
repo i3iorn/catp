@@ -263,7 +263,7 @@ impl Datagram {
             records: Vec::new(),
             raw: asserted_time.to_be_bytes().to_vec(),
         };
-        let key = secret.time_key(sender_id);
+        let key = secret.time_key(sender_id, Direction::CollectorToNode);
         let mut signed = Vec::with_capacity(13 + 8);
         signed.extend_from_slice(&d.auth_header(0)); // epoch_id 0: no epoch
         signed.extend_from_slice(&d.raw);
@@ -271,6 +271,32 @@ impl Datagram {
         let mut out = Vec::with_capacity(HEADER_LEN + 8 + 8);
         out.extend_from_slice(&d.header_bytes());
         out.extend_from_slice(&d.raw);
+        out.extend_from_slice(&tag);
+        Ok(out)
+    }
+
+    /// Build a `TIME_REQUEST` (PROTOCOL.md 11.3).
+    ///
+    /// Empty payload, `cipher_id` `0x01`, `epoch_low` 0, `datagram_offset` 0,
+    /// authenticated under the node-to-collector `time_key`. It carries no
+    /// claimed time, so a node cannot use it to propose, select, or influence
+    /// the time the collector will announce.
+    pub fn time_request(sender_id: u32, secret: &DeviceSecret) -> Result<Vec<u8>, Error> {
+        let d = Self {
+            version: VERSION,
+            msg_type: MsgType::TimeRequest as u8,
+            cipher_id: CipherId::HmacSha256T64 as u8,
+            epoch_low: 0,
+            reserved: 0,
+            datagram_offset: 0,
+            sender_id,
+            records: Vec::new(),
+            raw: Vec::new(),
+        };
+        let key = secret.time_key(sender_id, Direction::NodeToCollector);
+        let tag = mac(CipherId::HmacSha256T64, &key, &d.auth_header(0))?;
+        let mut out = Vec::with_capacity(HEADER_LEN + 8);
+        out.extend_from_slice(&d.header_bytes());
         out.extend_from_slice(&tag);
         Ok(out)
     }
@@ -305,7 +331,75 @@ pub struct PeerConfig {
     pub layouts: Vec<(u8, u8)>,
 }
 
-/// Verify a `TIME_ANNOUNCE` under `time_key` (PROTOCOL.md 11.3).
+/// Header constraints shared by `TIME_REQUEST` and `TIME_ANNOUNCE`.
+///
+/// Both travel outside any epoch, so these fields are pinned to a single
+/// canonical form rather than carrying information (PROTOCOL.md 11.3, 11.4).
+/// Returns the reserved bits, which remain must-ignore.
+fn check_time_header(buf: &[u8], want: MsgType, sender_id: u32) -> Result<u8, Error> {
+    if (buf[0] >> 5) & 0x07 != VERSION {
+        return Err(Error::UnsupportedVersion((buf[0] >> 5) & 0x07));
+    }
+    if buf[0] & 0x1F != want as u8 {
+        return Err(Error::BadMsgType(buf[0] & 0x1F));
+    }
+    if (buf[1] >> 4) & 0x0F != CipherId::HmacSha256T64 as u8 {
+        return Err(Error::CipherMismatch {
+            got: (buf[1] >> 4) & 0x0F,
+            want: CipherId::HmacSha256T64 as u8,
+        });
+    }
+    if buf[1] & 0x0F != 0 {
+        return Err(Error::Framing("time-recovery epoch_low must be zero"));
+    }
+    let off = (((buf[2] & 0x07) as u32) << 16) | ((buf[3] as u32) << 8) | buf[4] as u32;
+    if off != 0 {
+        return Err(Error::Framing("time-recovery datagram_offset must be zero"));
+    }
+    let got = u32::from_be_bytes([buf[5], buf[6], buf[7], buf[8]]);
+    if got != sender_id {
+        return Err(Error::UnknownSender(got));
+    }
+    Ok((buf[2] >> 3) & 0x1F)
+}
+
+/// Verify a `TIME_REQUEST` under the node-to-collector `time_key`
+/// (PROTOCOL.md 11.3).
+///
+/// A valid request neither establishes nor advances time; it only says that
+/// this node is asking. Because it carries `datagram_offset` 0 by
+/// construction, the replay window of Section 10.2 cannot cover it, so callers
+/// MUST rate-limit their responses.
+pub fn decode_time_request(
+    buf: &[u8],
+    sender_id: u32,
+    secret: &DeviceSecret,
+) -> Result<(), Error> {
+    let tag_len = CipherId::HmacSha256T64.tag_len();
+    if buf.len() != HEADER_LEN + tag_len {
+        return Err(Error::TooShort);
+    }
+    let reserved = check_time_header(buf, MsgType::TimeRequest, sender_id)?;
+    let d = Datagram {
+        version: VERSION,
+        msg_type: MsgType::TimeRequest as u8,
+        cipher_id: CipherId::HmacSha256T64 as u8,
+        epoch_low: 0,
+        reserved,
+        datagram_offset: 0,
+        sender_id,
+        records: Vec::new(),
+        raw: Vec::new(),
+    };
+    let key = secret.time_key(sender_id, Direction::NodeToCollector);
+    if !ct_eq(&mac(CipherId::HmacSha256T64, &key, &d.auth_header(0))?, &buf[HEADER_LEN..]) {
+        return Err(Error::AuthFailed);
+    }
+    Ok(())
+}
+
+/// Verify a `TIME_ANNOUNCE` under the collector-to-node `time_key`
+/// (PROTOCOL.md 11.4).
 ///
 /// Separate from [`decode`] because it is the one message keyed on something
 /// other than an epoch key, and the one a receiver must handle before it knows
@@ -320,50 +414,25 @@ pub fn decode_time_announce(
     if buf.len() != HEADER_LEN + 8 + tag_len {
         return Err(Error::TooShort);
     }
-    if (buf[0] >> 5) & 0x07 != VERSION {
-        return Err(Error::UnsupportedVersion((buf[0] >> 5) & 0x07));
-    }
-    if buf[0] & 0x1F != MsgType::TimeAnnounce as u8 {
-        return Err(Error::BadMsgType(buf[0] & 0x1F));
-    }
-    // Header constraints are normative, not cosmetic: they pin the one message
-    // whose MAC input is not epoch-bound to a single canonical form.
-    if (buf[1] >> 4) & 0x0F != CipherId::HmacSha256T64 as u8 {
-        return Err(Error::CipherMismatch {
-            got: (buf[1] >> 4) & 0x0F,
-            want: CipherId::HmacSha256T64 as u8,
-        });
-    }
-    if buf[1] & 0x0F != 0 {
-        return Err(Error::Framing("TIME_ANNOUNCE epoch_low must be zero"));
-    }
-    let off = (((buf[2] & 0x07) as u32) << 16) | ((buf[3] as u32) << 8) | buf[4] as u32;
-    if off != 0 {
-        return Err(Error::Framing("TIME_ANNOUNCE datagram_offset must be zero"));
-    }
-    let got_sender = u32::from_be_bytes([buf[5], buf[6], buf[7], buf[8]]);
-    if got_sender != sender_id {
-        return Err(Error::UnknownSender(got_sender));
-    }
+    let reserved = check_time_header(buf, MsgType::TimeAnnounce, sender_id)?;
 
     let payload = &buf[HEADER_LEN..HEADER_LEN + 8];
-    let tag = &buf[HEADER_LEN + 8..];
     let d = Datagram {
         version: VERSION,
         msg_type: MsgType::TimeAnnounce as u8,
         cipher_id: CipherId::HmacSha256T64 as u8,
         epoch_low: 0,
-        reserved: (buf[2] >> 3) & 0x1F,
+        reserved,
         datagram_offset: 0,
         sender_id,
         records: Vec::new(),
         raw: payload.to_vec(),
     };
-    let key = secret.time_key(sender_id);
+    let key = secret.time_key(sender_id, Direction::CollectorToNode);
     let mut signed = Vec::with_capacity(13 + 8);
     signed.extend_from_slice(&d.auth_header(0));
     signed.extend_from_slice(payload);
-    if !ct_eq(&mac(CipherId::HmacSha256T64, &key, &signed)?, tag) {
+    if !ct_eq(&mac(CipherId::HmacSha256T64, &key, &signed)?, &buf[HEADER_LEN + 8..]) {
         return Err(Error::AuthFailed);
     }
     let mut b = [0u8; 8];
@@ -400,8 +469,8 @@ pub fn decode(
     }
     // --- step 3: msg_type
     let mt = MsgType::from_u8(msg_type).ok_or(Error::BadMsgType(msg_type))?;
-    if mt == MsgType::TimeAnnounce {
-        // Keyed on time_key, not an epoch key; use decode_time_announce.
+    if matches!(mt, MsgType::TimeAnnounce | MsgType::TimeRequest) {
+        // Keyed on time_key, not an epoch key; use the dedicated entry points.
         return Err(Error::BadMsgType(msg_type));
     }
     // --- step 4: sender_id
@@ -644,6 +713,57 @@ mod tests {
         let acc = decode(&wire, &p, EPOCH, Direction::NodeToCollector, &mut w).unwrap();
         assert_eq!(acc.datagram.records.len(), 2);
         assert_eq!(acc.skipped.len(), 1);
+    }
+
+    #[test]
+    fn time_request_round_trips_and_is_directional() {
+        let s = DeviceSecret([3u8; 32]);
+        let wire = Datagram::time_request(0x1234, &s).unwrap();
+        assert_eq!(wire.len(), HEADER_LEN + 8); // no payload, 8-byte tag
+        assert!(decode_time_request(&wire, 0x1234, &s).is_ok());
+
+        // A request must not verify as an announce, nor under another node.
+        assert!(decode_time_announce(&wire, 0x1234, &s).is_err());
+        assert!(decode_time_request(&wire, 0x9999, &s).is_err());
+
+        // The two directions derive different keys, so a tag made with the
+        // wrong one is refused (PROTOCOL.md 11.2).
+        let d = Datagram {
+            version: VERSION,
+            msg_type: MsgType::TimeRequest as u8,
+            cipher_id: CipherId::HmacSha256T64 as u8,
+            epoch_low: 0,
+            reserved: 0,
+            datagram_offset: 0,
+            sender_id: 0x1234,
+            records: Vec::new(),
+            raw: Vec::new(),
+        };
+        let wrong = mac(
+            CipherId::HmacSha256T64,
+            &s.time_key(0x1234, Direction::CollectorToNode),
+            &d.auth_header(0),
+        )
+        .unwrap();
+        let mut forged = d.header_bytes().to_vec();
+        forged.extend_from_slice(&wrong);
+        assert_eq!(decode_time_request(&forged, 0x1234, &s).unwrap_err(), Error::AuthFailed);
+    }
+
+    #[test]
+    fn time_request_is_tamper_evident() {
+        let s = DeviceSecret([3u8; 32]);
+        let wire = Datagram::time_request(0x1234, &s).unwrap();
+        for byte in 0..wire.len() {
+            for bit in 0..8 {
+                let mut t = wire.clone();
+                t[byte] ^= 1 << bit;
+                assert!(
+                    decode_time_request(&t, 0x1234, &s).is_err(),
+                    "flip at byte {byte} bit {bit} accepted"
+                );
+            }
+        }
     }
 
     #[test]

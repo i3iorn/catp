@@ -253,14 +253,26 @@ fn main() {
         },
     );
 
-    // --- TIME_ANNOUNCE: its own key schedule ---
+    // --- time recovery: its own key schedule, one key per direction ---
+    let req = Datagram::time_request(id, &s).unwrap();
+    println!("# TIME_REQUEST, cipher 0x01 mandatory, node-to-collector time_key");
+    println!("kind         accept_time_request");
+    println!("device_secret {}", hex(&s.0));
+    println!("sender_id    {id:08x}");
+    println!("direction    00");
+    println!("time_key     {}", hex(&s.time_key(id, Direction::NodeToCollector)));
+    println!("wire         {}", hex(&req));
+    println!("wire_len     {}", req.len());
+    println!();
+
     let asserted = 1_700_000_000i64;
     let wire = Datagram::time_announce(id, asserted, &s).unwrap();
-    println!("# TIME_ANNOUNCE, cipher 0x01 mandatory, keyed on time_key");
+    println!("# TIME_ANNOUNCE, cipher 0x01 mandatory, collector-to-node time_key");
     println!("kind         accept_time_announce");
     println!("device_secret {}", hex(&s.0));
     println!("sender_id    {id:08x}");
-    println!("time_key     {}", hex(&s.time_key(id)));
+    println!("direction    01");
+    println!("time_key     {}", hex(&s.time_key(id, Direction::CollectorToNode)));
     println!("asserted_time {asserted}");
     println!("wire         {}", hex(&wire));
     println!("wire_len     {}", wire.len());

@@ -105,8 +105,9 @@ pub enum MsgType {
     Number = 0x04,
     EpochAnnounce = 0x10,
     TimeAnnounce = 0x11,
-    Heartbeat = 0x12,
-    CapabilityAdvertise = 0x13,
+    TimeRequest = 0x12,
+    Heartbeat = 0x13,
+    CapabilityAdvertise = 0x14,
 }
 
 impl MsgType {
@@ -125,8 +126,9 @@ impl MsgType {
             0x04 => Some(Self::Number),
             0x10 => Some(Self::EpochAnnounce),
             0x11 => Some(Self::TimeAnnounce),
-            0x12 => Some(Self::Heartbeat),
-            0x13 => Some(Self::CapabilityAdvertise),
+            0x12 => Some(Self::TimeRequest),
+            0x13 => Some(Self::Heartbeat),
+            0x14 => Some(Self::CapabilityAdvertise),
             _ => None,
         }
     }
@@ -280,12 +282,16 @@ impl DeviceSecret {
     }
 
     /// Epoch-independent bootstrap key (PROTOCOL.md 11.2).
-    pub fn time_key(&self, sender_id: u32) -> [u8; 32] {
+    ///
+    /// `direction` is a key-derivation input, so `TIME_REQUEST` (`0x00`) and
+    /// `TIME_ANNOUNCE` (`0x01`) are authenticated under distinct keys. A
+    /// receiver MUST NOT accept a tag generated with the opposite direction.
+    pub fn time_key(&self, sender_id: u32, direction: Direction) -> [u8; 32] {
         let hk = Hkdf::<Sha256>::new(None, &self.0);
         let mut info = Vec::with_capacity(10 + 4 + 1);
         info.extend_from_slice(b"CATP1-time");
         info.extend_from_slice(&sender_id.to_be_bytes());
-        info.push(Direction::CollectorToNode as u8);
+        info.push(direction as u8);
         let mut okm = [0u8; 32];
         hk.expand(&info, &mut okm).expect("32 is a valid HKDF length");
         okm
@@ -584,7 +590,12 @@ mod tests {
         assert_ne!(a, b);
         assert_ne!(a, c);
         assert_ne!(a, d);
-        assert_ne!(a, s.time_key(1));
+        // Time keys are distinct from every epoch key and from each other.
+        let tq = s.time_key(1, Direction::NodeToCollector);
+        let ta = s.time_key(1, Direction::CollectorToNode);
+        assert_ne!(a, tq);
+        assert_ne!(a, ta);
+        assert_ne!(tq, ta, "TIME_REQUEST and TIME_ANNOUNCE must not share a key");
     }
 
     #[test]
@@ -604,6 +615,10 @@ mod tests {
         assert!(!is_control(MsgType::Message as u8));
         assert!(!is_control(MsgType::Number as u8));
         assert!(is_control(MsgType::Heartbeat as u8));
+        assert!(is_control(MsgType::TimeRequest as u8));
+        assert_eq!(MsgType::from_u8(0x12), Some(MsgType::TimeRequest));
+        assert_eq!(MsgType::from_u8(0x13), Some(MsgType::Heartbeat));
+        assert_eq!(MsgType::from_u8(0x14), Some(MsgType::CapabilityAdvertise));
         assert!(MsgType::Message.is_record_framed());
         assert!(!MsgType::Number.is_record_framed());
         assert!(!is_vendor(MsgType::Message as u8));

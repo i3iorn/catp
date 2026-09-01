@@ -8,7 +8,7 @@
 //! Regenerate deliberately with:
 //!     cargo run --bin catp-vectors > docs/test-vectors.txt
 
-use catp::wire::{decode, decode_time_announce, Datagram, PeerConfig};
+use catp::wire::{decode, decode_time_announce, decode_time_request, Datagram, PeerConfig};
 use catp::*;
 use std::collections::HashMap;
 
@@ -152,12 +152,44 @@ fn time_announce_vector_verifies() {
     let sender_id = u32::from_str_radix(&m["sender_id"], 16).unwrap();
     let wire = unhex(&m["wire"]);
 
-    assert_eq!(secret.time_key(sender_id).to_vec(), unhex(&m["time_key"]), "time_key drifted");
+    assert_eq!(
+        secret.time_key(sender_id, Direction::CollectorToNode).to_vec(),
+        unhex(&m["time_key"]),
+        "collector-to-node time_key drifted"
+    );
     let got = decode_time_announce(&wire, sender_id, &secret).expect("must verify");
     assert_eq!(got, m["asserted_time"].parse::<i64>().unwrap());
 
     // And re-encoding reproduces it.
     assert_eq!(Datagram::time_announce(sender_id, got, &secret).unwrap(), wire);
+}
+
+/// The TIME_REQUEST vector verifies under the node-to-collector key, and must
+/// NOT verify under the announce key (PROTOCOL.md 11.2).
+#[test]
+fn time_request_vector_verifies_and_is_directional() {
+    let m = blocks()
+        .into_iter()
+        .find(|m| m.get("kind").map(String::as_str) == Some("accept_time_request"))
+        .expect("TIME_REQUEST vector missing");
+    let secret = DeviceSecret(unhex(&m["device_secret"]).try_into().unwrap());
+    let sender_id = u32::from_str_radix(&m["sender_id"], 16).unwrap();
+    let wire = unhex(&m["wire"]);
+
+    assert_eq!(
+        secret.time_key(sender_id, Direction::NodeToCollector).to_vec(),
+        unhex(&m["time_key"]),
+        "node-to-collector time_key drifted"
+    );
+    decode_time_request(&wire, sender_id, &secret).expect("must verify");
+    assert_eq!(Datagram::time_request(sender_id, &secret).unwrap(), wire);
+
+    // The two time keys are distinct, so a request must not pass as an announce.
+    assert!(decode_time_announce(&wire, sender_id, &secret).is_err());
+    assert_ne!(
+        secret.time_key(sender_id, Direction::NodeToCollector),
+        secret.time_key(sender_id, Direction::CollectorToNode)
+    );
 }
 
 /// Every literal the vectors mark accepted must pass, and every one marked
