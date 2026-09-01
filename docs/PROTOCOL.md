@@ -92,7 +92,7 @@ OPTIONAL in this document are to be interpreted as described in RFC 2119.
 - **Stateful replication.** CATP carries readings, not replicated state. A
   receiver holds no application state that a datagram updates incrementally, so
   nothing in this protocol can silently diverge from the sender. Deployments
-  needing snapshot/delta semantics must build them above CATP, where the
+  needing snapshot/delta semantics MUST build them above CATP, where the
   resynchronization machinery they require does not distort a protocol whose
   datagrams are otherwise independently interpretable.
 
@@ -165,6 +165,27 @@ oversized datagram.
 The loss arithmetic behind this limit, and why fragmentation is worse
 for CATP than for most protocols, is in [RATIONALE.md](RATIONALE.md) R1.
 
+---
+
+## 4. Datagram format
+
+```
+ 0                   1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+| ver |msg_type | cipher_id|epoch_low|  reserved | datagram_offset
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+        datagram_offset (cont.)        |         sender_id
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+                sender_id (cont.)      |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+  followed by:  payload (variable)  ||  MAC tag (length per cipher)
+```
+
+The header is 9 bytes. All multi-byte integers MUST be encoded in network byte
+order (big-endian).
+
 ### 4.1 Header fields
 
 | Field | Width | Description |
@@ -204,14 +225,14 @@ Why `datagram_offset` is a header field rather than a payload field is in
 
 The 5 reserved bits are the protocol's extension point.
 
-- Senders implementing this document MUST set both bits to zero.
+- Senders implementing this document MUST set all five bits to zero.
 - Receivers MUST ignore reserved bits whose meaning they do not know. A
   receiver MUST NOT reject a datagram because a reserved bit is set, and MUST
   process the datagram exactly as though the bit were clear.
 
 This is a deliberate reversal of the more common must-reject rule, and it is
 what allows the protocol to be extended without spending a `version` value, of
-which Section 4.3 leaves eight in total.
+which Section 5 leaves seven unassigned.
 
 Why must-ignore is safe here, when it is a downgrade hazard in most
 protocols, is in [RATIONALE.md](RATIONALE.md) R3.
@@ -219,7 +240,7 @@ protocols, is in [RATIONALE.md](RATIONALE.md) R3.
 #### 4.2.1 Constraints on future extensions
 
 Because unaware receivers ignore these bits, any extension assigned to them
-MUST be **semantically optional**: a receiver that does not implement it must
+MUST be **semantically optional**: a receiver that does not implement it MUST
 still arrive at a correct, if less informed, interpretation of the datagram.
 
 Accordingly, a reserved bit MUST NOT be used to signal any of the following,
@@ -233,17 +254,17 @@ because an unaware receiver would misparse rather than under-interpret:
 
 Extensions of that kind change how the datagram must be parsed or trusted, and
 MUST therefore use a new `version` or a new `msg_type`. An extension describing
-payload content should instead claim a `format` value (Section 6.4.2), which is
+payload content SHOULD instead claim a `format` value (Section 6.4.2), which is
 the designated space for exactly that, and which is far larger than either.
 
 With 5 bits available, an implementation may treat them as up to five
 independent must-ignore flags, or as one 32-valued advisory field, or any
 partition between. This document assigns none of them.
 
-Note what they cannot become. A channel or stream selector, for instance, is
-not a legal use: a receiver ignoring it would attribute readings to the wrong
-stream, which is misinterpretation rather than under-interpretation. Anything
-of that kind needs a new `msg_type`, of which the standard data range still has
+Note what they cannot become. A reserved bit MUST NOT carry a channel or stream
+selector: a receiver ignoring it would attribute readings to the wrong stream,
+which is misinterpretation rather than under-interpretation. An extension of
+that kind MUST use a new `msg_type`, of which the standard data range still has
 three free.
 
 ### 4.3 Field order and packing
@@ -456,7 +477,7 @@ CATP defines no stateful-replication messages. Snapshot/delta replication
 requires a receiver that holds application state, a return path to request
 resynchronization, and timers to bound the divergence between them — three
 properties that contradict the premise that every CATP datagram is
-independently interpretable. A deployment needing them should build them above
+independently interpretable. A deployment needing them SHOULD build them above
 this protocol rather than inside it.
 
 Deployments needing operational reporting SHOULD define it as a vendor data type
@@ -645,7 +666,7 @@ interpret field numbers at all. Only the pair identifies a layout.
 
 254 versions per format is ample for a field that increments when a layout
 changes. A deployment approaching exhaustion has revised one layout 253 times
-and should allocate a second `format` value or reconsider its schema discipline.
+and SHOULD allocate a second `format` value or reconsider its schema discipline.
 
 ##### 6.4.2.2 `UNSTRUCTURED` (`0xFF`)
 
@@ -857,7 +878,7 @@ advertised something (Section 5); the message exists so that mismatches are
 detectable and diagnosable, not so that parameters are negotiated in band.
 
 In particular, advertising a `(format, schema_version)` pair does not make a
-receiver able to read it. The receiver must hold the field definition behind that
+receiver able to read it. The receiver MUST hold the field definition behind that
 pair, which this message does not carry and deliberately cannot. What it does provide
 is early, authenticated warning that a peer intends to send something the
 receiver will otherwise silently skip (Section 6.4.4).
@@ -1034,7 +1055,7 @@ no longer larger than the data.
 
 A 4-byte tag gives roughly 2^-32 forgery probability per attempt, which is not
 adequate on its own. A receiver accepting `0x04` MUST therefore enforce a
-per-`sender_id` inbound rate limit (Section 10.5), and deployments MUST NOT
+per-`sender_id` inbound rate limit (Section 10.3), and deployments MUST NOT
 select it where that limit cannot be enforced. This is a MUST rather than the
 SHOULD that applies to other suites: at 8 bytes rate limiting is defence in
 depth, while at 4 bytes it is what makes the tag length defensible at all. At a
@@ -1075,21 +1096,9 @@ Each association uses exactly one cipher suite, configured out of band per
 whose `cipher_id` differs from the configured value for that `sender_id`, at
 step 5 of Section 7.4, before computing a MAC.
 
-CATP has no in-band mechanism for ratcheting cipher strength upward — no
-per-suite security level, no negotiated floor, no announcement message. Such a
-mechanism does not survive contact with the provisioning model: a deployment
-that can distribute a 32-byte `device_secret` out of band can distribute a
-one-byte cipher selection over the same channel, and doing so gives a strictly
-stronger guarantee. Configuration is enforced from the first datagram, whereas
-a high-water mark is only as good as the highest datagram a receiver happened
-to have seen.
-
-A negotiated floor would also have no recovery path. Being monotonic and
-persistent across restarts, it would let a single datagram verifying at an
-elevated level permanently lock out a legitimate peer that later fell back,
-with no way to clear it short of touching the receiver's storage. If an
-operator must touch the receiver either way, the configuration is the better
-place to express the policy.
+CATP has no in-band mechanism for ratcheting cipher strength upward: this
+document defines no per-suite security level, no negotiated floor, and no
+announcement message, and a receiver MUST NOT infer one.
 
 Migrating an association to a different suite is therefore a provisioning
 operation: update the receiver's configuration for that `sender_id`, then the
@@ -1098,10 +1107,9 @@ rejected. Deployments that cannot tolerate that gap SHOULD provision the
 receiver to accept a configured pair of suites for the duration of the
 migration, and MUST narrow it to one when the migration completes.
 
-`cipher_id` remains a header field despite carrying no negotiation. It costs no
-additional bytes, it makes captured traffic self-describing during exactly the
-migration window described above, and it keeps the per-datagram check in Section
-7.4 a comparison rather than an assumption.
+Why selection is configured rather than negotiated, and why `cipher_id` remains
+a header field despite carrying no negotiation, is in
+[RATIONALE.md](RATIONALE.md) R8.
 
 ### 8.4 Unrecognized cipher_id
 
@@ -1148,25 +1156,22 @@ epoch input, is specified in Section 11.2.
 
 Endpoints MUST NOT transmit `device_secret` or any derived key on the wire.
 
-#### 9.2.1 Why keys are per-device, not fleet-wide
+#### 9.2.1 Secrets are per-device
 
-A single fleet-wide secret would make `sender_id` decorative. Every node would
-hold the key needed to produce a valid MAC over any `sender_id`, so any
-compromised or malicious node could impersonate any other, and a receiver could
-not distinguish them. The identity field would authenticate nothing.
+Every node holds a `device_secret` distinct from every other node's. A
+receiver's key lookup is therefore the identity check: a datagram claiming
+`sender_id` X verifies only under X's key.
 
-Per-device secrets mean a receiver's key lookup *is* the identity check: a
-datagram claiming `sender_id` X verifies only under X's key. Compromise of one
-device exposes that device's traffic and no other's.
+- Deployments MUST NOT substitute a single fleet-wide secret.
+- Deployments MUST NOT derive `device_secret` from a fleet root
+  (`device_secret = KDF(root, sender_id)`).
 
 The cost is collector-side storage and provisioning: 32 bytes per node, and a
 provisioning step that generates and distributes a distinct secret per device.
 At the fleet sizes of Section 4.4.1 that is at most a few hundred kilobytes.
-Deployments MUST NOT substitute a fleet-wide secret to avoid this cost.
 
-Deriving `device_secret` from a fleet root (`device_secret = KDF(root,
-sender_id)`) is NOT permitted. It reintroduces the same failure: any device
-whose root is extracted yields every other device's key.
+Why both prohibitions are absolute, and what a fleet-wide secret would cost, is
+in [RATIONALE.md](RATIONALE.md) R9.
 
 #### 9.2.2 Direction separation
 
@@ -1174,32 +1179,24 @@ The `direction` byte prevents a datagram sent by a node from being replayed back
 to it as though the collector had sent it. Without it, both directions share one
 key and a reflected datagram verifies.
 
-#### 9.2.3 Why the collector has no identity of its own
+#### 9.2.3 The collector has no identity of its own
 
 Both directions of an association key on the **node's** `device_secret` and the
 node's `sender_id`, separated only by `direction`. The collector holds no secret
-of its own and is never named on the wire.
+of its own, is never named on the wire, and MUST NOT be assigned a `sender_id`
+or `device_secret` of its own.
 
-The alternative — giving the collector its own `sender_id` and `device_secret`,
-as a naive reading of "sender" would suggest — quietly destroys the property
-Section 9.2.1 establishes. Every node would need the collector's secret in order
-to verify collector-originated messages. That single secret would then sit in
-the firmware of every device in the fleet, and extracting it from any one node
-would let the attacker impersonate the collector to every other node. It is the
-fleet-wide-key failure reintroduced through the return path.
-
-Under the arrangement specified here, a node holds exactly one secret: its own.
-Extracting it yields the ability to forge collector traffic to **that node
-only**, which the attacker already fully controls, so the return path adds no
-blast radius beyond the compromise itself.
-
-The cost is that collectors are not mutually distinguishable to a node: any
-party holding a node's `device_secret` can speak to it as the collector. In a
-deployment with several collectors sharing provisioning data, one collector can
-impersonate another to a node. Deployments needing to separate collectors MUST
-add a collector identifier to the `info` string of Section 9.2 and provision
-per-collector keys accordingly; this document does not define that, because the
+A node therefore holds exactly one secret: its own. The consequence is that
+collectors are not mutually distinguishable to a node — any party holding a
+node's `device_secret` can speak to it as the collector — so in a deployment
+with several collectors sharing provisioning data, one collector can impersonate
+another to a node. Deployments needing to separate collectors MUST add a
+collector identifier to the `info` string of Section 9.2 and provision
+per-collector keys accordingly. This document does not define that: the
 single-collector case is the one CATP targets.
+
+Why giving the collector its own identity would reintroduce the fleet-wide-key
+failure through the return path is in [RATIONALE.md](RATIONALE.md) R10.
 
 #### 9.2.4 Epoch derivation from the clock
 
@@ -1358,7 +1355,7 @@ are discarded.
 A window of 16,384 entries is RECOMMENDED. That is 2 KiB of state per
 `sender_id` per epoch and, because offsets are clock ticks, exactly 4 seconds of
 reordering tolerance — a figure that does not change with the sender's rate.
-Deployments on paths with known worse reordering, or with tighter memory, should
+Deployments on paths with known worse reordering, or with tighter memory, SHOULD
 size the window in seconds and convert: `entries = tolerance_seconds * 4096`.
 
 The finer tick makes this window eight times larger in entries than the same
@@ -1888,7 +1885,7 @@ decisions:
    out of scope for this document and are the largest remaining deployment task.
 2. **Layout definition and distribution** (Section 6.4.2.1): assignment of
    `schema_version` values per `format`, and the per-field layout, widths, and
-   units behind each, must be defined, version-controlled, and distributed to
+   units behind each, MUST be defined, version-controlled, and distributed to
    collectors out of band. The protocol detects a mismatch; it does not resolve
    one.
 3. **Time synchronization mechanism** (Sections 11, 12.6): whether a deployment
@@ -1899,7 +1896,7 @@ decisions:
    clock now supplies restart safety. A node without one needs `last_epoch`
    persisted as a monotonic floor. This is the remaining driver of whether a
    deployment needs writable storage on the node.
-5. **Records per datagram and flush timer** (Section 6.6.1): must be chosen
+5. **Records per datagram and flush timer** (Section 6.6.1): MUST be chosen
    against measured loss rate and acceptable latency, not set to whatever
    `payload_budget` allows.
 6. **`max_datagram_size`** (Section 3.1): the defaults are deliberately
@@ -1909,16 +1906,16 @@ decisions:
    paces a sender to at most one datagram per 1/4096-second tick, 4096 per
    second.
    This is a pacing constraint, not a budget: a burst of two datagrams in one
-   tick violates it however low the average rate. Deployments must confirm their
+   tick violates it however low the average rate. Deployments MUST confirm their
    burst behaviour coalesces into records rather than datagrams.
 8. **Multi-collector deployments** (Section 9.2.3): separating collectors
    cryptographically requires an extension to the key derivation that this
    document does not define.
-9. **Reserved bit assignment** (Section 4.2): the 2 must-ignore bits are
-   unassigned, and matter more than they did, since Section 4.3 leaves only
-   four wire versions in total. Any use must satisfy the semantic-optionality constraints of
-   Section 4.2.1, which rule out most of what an extension typically wants to
-   do; whether a worthwhile use exists is open.
+9. **Reserved bit assignment** (Section 4.2): the 5 must-ignore bits are
+   unassigned, and matter more than they did, since Section 5 leaves only seven
+   unassigned wire versions. Any use MUST satisfy the semantic-optionality
+   constraints of Section 4.2.1, which rule out most of what an extension
+   typically wants to do; whether a worthwhile use exists is open.
 
 ---
 

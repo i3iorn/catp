@@ -30,27 +30,6 @@ batching multiply each other's loss amplification, which makes staying inside
 
 ---
 
-## 4. Datagram format
-
-```
- 0                   1                   2                   3
- 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-| ver |msg_type | cipher_id|epoch_low|  reserved | datagram_offset
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-        datagram_offset (cont.)        |         sender_id
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-                sender_id (cont.)      |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-
-  followed by:  payload (variable)  ||  MAC tag (length per cipher)
-```
-
-The header is 9 bytes. All multi-byte integers are network byte order
-(big-endian).
-
----
-
 ## R2. Why the offset is in the header
 
 Justifies [PROTOCOL.md](PROTOCOL.md) §4.1.
@@ -212,3 +191,70 @@ label available and require it be resolvable; it cannot make a deployment
 honest.
 
 ---
+
+## R8. Why cipher selection is configured rather than negotiated
+
+Justifies [PROTOCOL.md](PROTOCOL.md) §8.3.
+
+An in-band mechanism for ratcheting cipher strength upward does not survive
+contact with the provisioning model. A deployment that can distribute a 32-byte
+`device_secret` out of band can distribute a one-byte cipher selection over the
+same channel, and doing so gives a strictly stronger guarantee: configuration is
+enforced from the first datagram, whereas a high-water mark is only as good as
+the highest datagram a receiver happened to have seen.
+
+A negotiated floor would also have no recovery path. Being monotonic and
+persistent across restarts, it would let a single datagram verifying at an
+elevated level permanently lock out a legitimate peer that later fell back, with
+no way to clear it short of touching the receiver's storage. If an operator must
+touch the receiver either way, the configuration is the better place to express
+the policy.
+
+`cipher_id` remains a header field despite carrying no negotiation. It costs no
+additional bytes, it makes captured traffic self-describing during exactly the
+migration window §8.3 describes, and it keeps the per-datagram check in §7.4 a
+comparison rather than an assumption.
+
+---
+
+## R9. What a fleet-wide secret would cost
+
+Justifies [PROTOCOL.md](PROTOCOL.md) §9.2.1.
+
+A single fleet-wide secret would make `sender_id` decorative. Every node would
+hold the key needed to produce a valid MAC over any `sender_id`, so any
+compromised or malicious node could impersonate any other, and a receiver could
+not distinguish them. The identity field would authenticate nothing.
+
+Per-device secrets mean a receiver's key lookup *is* the identity check, and
+compromise of one device exposes that device's traffic and no other's. That is
+the whole of what `sender_id` is worth, which is why the prohibition is absolute
+rather than a recommendation: the storage it saves is a few hundred kilobytes at
+the fleet sizes of §4.4.1, and what it spends is every identity guarantee in the
+protocol.
+
+Deriving per-device keys from a fleet root is the same failure wearing a KDF.
+The root reduces provisioning cost by existing in one place, and any device
+whose root is extracted yields every other device's key.
+
+---
+
+## R10. Why the collector has no identity of its own
+
+Justifies [PROTOCOL.md](PROTOCOL.md) §9.2.3.
+
+Giving the collector its own `sender_id` and `device_secret`, as a naive reading
+of "sender" would suggest, quietly destroys the property §9.2.1 establishes.
+Every node would need the collector's secret in order to verify
+collector-originated messages. That single secret would then sit in the firmware
+of every device in the fleet, and extracting it from any one node would let the
+attacker impersonate the collector to every other node. It is the fleet-wide-key
+failure of R9, reintroduced through the return path.
+
+Under the arrangement §9.2.3 specifies, extracting a node's secret yields the
+ability to forge collector traffic to **that node only** — which the attacker
+already fully controls — so the return path adds no blast radius beyond the
+compromise itself.
+
+---
+
