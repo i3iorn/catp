@@ -2,12 +2,14 @@
 
 **Non-normative.** Nothing here constrains an implementation. Every rule an
 implementer must follow is in [PROTOCOL.md](PROTOCOL.md); this document explains
-why some of the less obvious ones are the way they are.
+why some of the less obvious ones are the way they are. Guidance on the choices
+the specification leaves to a deployment is in [DEPLOYMENT.md](DEPLOYMENT.md).
 
-It exists because the two audiences differ. Someone writing an implementation
-needs the rules and needs to be sure they have not missed one. Someone deciding
+It exists because the audiences differ. Someone writing an implementation needs
+the rules and needs to be sure they have not missed one. Someone deciding
 whether the design is sound, or proposing to change it, needs the arguments.
-Interleaving them served neither.
+Someone standing a fleet up needs neither, and needs to know what to choose.
+Interleaving the three served none of them.
 
 Each entry names the section it justifies.
 
