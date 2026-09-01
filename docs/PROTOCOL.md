@@ -616,10 +616,9 @@ which a single reading costs 60, so no text format is registered. A deployment
 that wants text can carry it under `NONE` without this document appearing to
 recommend it.
 
-`NONE` (`0x01`) imposes no structure at all and is the right choice for
-fixed-width binary telemetry, where the body is a handful of packed fields and
-any self-describing encoding would cost more than the data. It is also the
-escape hatch for encodings this registry does not name.
+`NONE` (`0x01`) imposes no structure at all, and is also the escape hatch for
+encodings this registry does not name. Guidance on choosing between `NONE` and a
+self-describing encoding is in [DEPLOYMENT.md](DEPLOYMENT.md) D3.
 
 The four bits admit sixteen values and six are assigned. Because `format` names
 a *serialization* rather than an application concept, the space is adequate: new
@@ -639,7 +638,9 @@ field definition to hand it.
 - `0xFF` is reserved as `UNSTRUCTURED` and carries the same meaning under every
   `format` (Section 6.4.2.2).
 - Values `0x01`-`0xFE` are assigned by the deploying organization, independently
-  per `format`.
+  per `format`. The layout behind each — field order, widths, and units — MUST be
+  defined, version-controlled, and distributed to receivers out of band. The
+  protocol detects a mismatch; it does not resolve one.
 - A receiver MUST discard a record whose `(format, schema_version)` pair it holds
   no definition for, after MAC verification (Section 6.4.4). This holds for
   `UNSTRUCTURED` too: `0xFF` is a reserved meaning, not a standing permission.
@@ -831,9 +832,11 @@ discrete and not superseded by subsequent transmissions, and delaying one to
 fill a batch defeats the purpose of a distinct message type. They are
 transmitted immediately.
 
-Senders SHOULD bound batch latency with a flush timer as well as a size target,
-transmitting on whichever triggers first, so that a slow data source does not
-hold records indefinitely. A flush delay now moves the whole batch's timestamp,
+Batch size and flush timer MUST be chosen against measured loss rate and
+acceptable latency, not set to whatever `payload_budget` allows. Senders SHOULD
+bound batch latency with a flush timer as well as a size target, transmitting on
+whichever triggers first, so that a slow data source does not hold records
+indefinitely. A flush delay now moves the whole batch's timestamp,
 not just its arrival, so the timer bounds a real error rather than a cosmetic
 one (Section 6.4.1).
 
@@ -1063,16 +1066,13 @@ limit of 128 datagrams per second an attacker needs roughly a year of sustained
 flooding per expected forgery, and each attempt is a datagram the receiver
 counts.
 
-`0x04` is the right default for battery-powered or duty-cycled links where bytes
-translate directly into energy, and for deployments whose telemetry has little
-value to an attacker. It is the wrong choice for anything where a single forged
-reading has consequence, or where the receiver cannot rate-limit. Where the
-threat model is unclear, `0x01` is the safer default and costs 4 bytes.
-
 `0x01` is the RECOMMENDED default. `0x02` is a lateral alternative for senders
 where SHA-256 is disproportionately expensive. `0x03` is for deployments
 requiring a tag longer than 64 bits (Section 12.2). `0x04` trades tag strength
 for wire bytes under the conditions of Section 8.1.1.
+
+Guidance on choosing between them for a given link and threat model is in
+[DEPLOYMENT.md](DEPLOYMENT.md) D1.
 
 Any future suite added at this `cipher_id` width MUST state whether it requires
 a nonce, and if so MUST derive it from `datagram_offset` exactly as Section 7.2
@@ -1358,11 +1358,8 @@ reordering tolerance — a figure that does not change with the sender's rate.
 Deployments on paths with known worse reordering, or with tighter memory, SHOULD
 size the window in seconds and convert: `entries = tolerance_seconds * 4096`.
 
-The finer tick makes this window eight times larger in entries than the same
-tolerance would have cost at a coarser tick. A receiver tracking many senders
-may prefer a
-1-second window (4096 entries, 512 bytes), which still exceeds observed
-reordering on most paths by a wide margin.
+Guidance on sizing the window against measured reordering is in
+[DEPLOYMENT.md](DEPLOYMENT.md) D2.
 
 ### 10.3 Rate limiting and shedding
 
@@ -1389,7 +1386,9 @@ code can exceed steady-state rates by orders of magnitude. Senders SHOULD
 implement a token bucket sized to `max_rate`, and MUST coalesce rather than
 queue when the bucket is empty: several readings that arrive within one tick
 belong in one datagram as several records, which costs one offset instead of
-several and is the behaviour the record format exists to make cheap.
+several and is the behaviour the record format exists to make cheap. Deployments
+MUST confirm that their burst behaviour coalesces into records rather than
+datagrams.
 
 **Shedding policy.** On exhausting its budget a sender MUST drop datagrams
 rather than queue them unboundedly, and SHOULD drop by priority: `MESSAGE`
@@ -1877,45 +1876,28 @@ meant.
 
 ## 15. Open items
 
-The following are deliberately unresolved and require deployment-specific
-decisions:
+This document deliberately leaves the following unspecified. Each requires a
+decision the deploying organization makes for itself, and none has a default
+this specification can supply:
 
-1. **`device_secret` provisioning and rotation** (Section 9.2): generation,
-   injection at manufacture, storage at rest, and post-compromise reissue are
-   out of scope for this document and are the largest remaining deployment task.
-2. **Layout definition and distribution** (Section 6.4.2.1): assignment of
-   `schema_version` values per `format`, and the per-field layout, widths, and
-   units behind each, MUST be defined, version-controlled, and distributed to
-   collectors out of band. The protocol detects a mismatch; it does not resolve
-   one.
-3. **Time synchronization mechanism** (Sections 11, 12.6): whether a deployment
-   provisions GNSS, PTP, NTS, or a battery-backed RTC — and therefore whether it
-   enables `TIME_ANNOUNCE` at all — is unspecified.
-4. **Whether `TIME_ANNOUNCE` is implemented at all** (Sections 11, 10.4): a
-   node with an authenticated time source needs no non-volatile state, since the
-   clock now supplies restart safety. A node without one needs `last_epoch`
-   persisted as a monotonic floor. This is the remaining driver of whether a
-   deployment needs writable storage on the node.
-5. **Records per datagram and flush timer** (Section 6.6.1): MUST be chosen
-   against measured loss rate and acceptable latency, not set to whatever
-   `payload_budget` allows.
-6. **`max_datagram_size`** (Section 3.1): the defaults are deliberately
-   conservative. Raising them requires either full path control with direct
-   measurement or an RFC 8899 implementation.
-7. **Peak per-sender datagram rate** (Sections 10.1, 10.3): `datagram_offset`
-   paces a sender to at most one datagram per 1/4096-second tick, 4096 per
-   second.
-   This is a pacing constraint, not a budget: a burst of two datagrams in one
-   tick violates it however low the average rate. Deployments MUST confirm their
-   burst behaviour coalesces into records rather than datagrams.
-8. **Multi-collector deployments** (Section 9.2.3): separating collectors
-   cryptographically requires an extension to the key derivation that this
-   document does not define.
-9. **Reserved bit assignment** (Section 4.2): the 5 must-ignore bits are
-   unassigned, and matter more than they did, since Section 5 leaves only seven
-   unassigned wire versions. Any use MUST satisfy the semantic-optionality
-   constraints of Section 4.2.1, which rule out most of what an extension
-   typically wants to do; whether a worthwhile use exists is open.
+1. `device_secret` provisioning and rotation (Section 9.2).
+2. `schema_version` assignment, and the layouts behind those values
+   (Section 6.4.2.1).
+3. The time synchronization mechanism (Sections 11, 12.6).
+4. Whether `TIME_ANNOUNCE` is implemented at all, which drives whether a node
+   needs writable storage (Sections 11, 10.4).
+5. Records per datagram and the flush timer (Section 6.6.1).
+6. `max_datagram_size` above the conservative defaults (Section 3.1).
+7. Peak per-sender datagram rate within the pacing constraint
+   (Sections 10.1, 10.3).
+8. Cryptographic separation of multiple collectors, which requires an extension
+   to the key derivation this document does not define (Section 9.2.3).
+9. Assignment of the 5 reserved bits, constrained by Section 4.2.1
+   (Section 4.2).
+
+The normative requirements attached to these choices are stated in the sections
+named above, not here. Guidance on making each, numbered to match this list, is
+in [DEPLOYMENT.md](DEPLOYMENT.md) D4.
 
 ---
 
