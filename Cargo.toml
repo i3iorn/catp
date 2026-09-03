@@ -10,6 +10,7 @@ repository = "https://github.com/i3iorn/catp"
 hmac = "0.13"
 sha2 = "0.11"
 hkdf = "0.13"
+subtle = "2"
 zeroize = { version = "1", features = ["derive"] }
 
 [[bin]]
