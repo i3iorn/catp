@@ -94,6 +94,7 @@ fn every_accept_vector_verifies_and_reencodes() {
             secret: secret.clone(),
             cipher,
             layouts: (1u8..=6).flat_map(|f| (0u8..=255).map(move |s| (f, s))).collect(),
+            inbound_rate_limit: None, // decode() called directly; bypasses PeerState
         };
         let mut w = ReplayWindow::one_second();
         let acc = decode(&wire, &peer, epoch, dir, &mut w)
@@ -134,6 +135,7 @@ fn reserved_bit_vector_is_ignored_not_rejected() {
         secret,
         cipher: CipherId::from_u8(unhex(&m["cipher_id"])[0]).unwrap(),
         layouts: vec![],
+        inbound_rate_limit: None, // decode() called directly; bypasses PeerState
     };
     let mut w = ReplayWindow::one_second();
     let acc = decode(&wire, &peer, m["epoch_id"].parse().unwrap(), Direction::NodeToCollector, &mut w)
@@ -231,6 +233,7 @@ fn every_vector_is_tamper_evident() {
             secret,
             cipher,
             layouts: (1u8..=6).flat_map(|f| (0u8..=255).map(move |s| (f, s))).collect(),
+            inbound_rate_limit: None, // decode() called directly; bypasses PeerState
         };
         // One flip per byte is enough breadth here; wire.rs flips every bit.
         for byte in 0..wire.len() {

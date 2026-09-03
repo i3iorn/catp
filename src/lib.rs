@@ -101,6 +101,16 @@ impl CipherId {
     pub fn implemented(self) -> bool {
         matches!(self, Self::HmacSha256T64 | Self::HmacSha256T32)
     }
+
+    /// Whether a receiver accepting this suite MUST enforce a per-`sender_id`
+    /// inbound rate limit (PROTOCOL.md 8.1.1).
+    ///
+    /// True only for `0x04`: at an 8-byte tag, rate limiting is defence in
+    /// depth (SHOULD, Section 10.3); at 4 bytes it is what makes the tag
+    /// length defensible at all.
+    pub fn requires_inbound_rate_limit(self) -> bool {
+        matches!(self, Self::HmacSha256T32)
+    }
 }
 
 /// Message types (PROTOCOL.md 6.1, 6.2). 5 bits: `0x00`-`0x1F`.
@@ -212,6 +222,15 @@ pub enum Error {
     /// `TIME_ANNOUNCE` arrived at a node whose clock is already set.
     ClockAlreadyValid,
     NoClock,
+    /// This `sender_id`'s inbound rate limit (PROTOCOL.md 10.3, 8.1.1) has no
+    /// tokens left. The datagram already authenticated and replay-checked
+    /// successfully; it is discarded for budget, not for forgery.
+    RateLimited,
+    /// `cipher_id` `0x04` was configured for a peer with no
+    /// `inbound_rate_limit` (PROTOCOL.md 8.1.1: the limit is a MUST, not a
+    /// SHOULD, for the 4-byte tag). Refused at provisioning time rather than
+    /// left to be discovered under attack.
+    CipherRequiresRateLimit(u8),
 }
 
 /// Validate a `NUMBER` payload against the grammar of PROTOCOL.md 6.3.
@@ -460,6 +479,84 @@ impl Pacer {
                 self.last_offset = Some(offset);
                 Ok((epoch, offset))
             }
+        }
+    }
+}
+
+/// Receiver-side per-`sender_id` inbound rate limit (PROTOCOL.md 10.3
+/// "Receiver side", 8.1.1). `per_sec` is the steady-state budget; `burst`
+/// caps how many tokens can accumulate, so a quiet peer cannot bank an
+/// unbounded allowance and spend it in one instant.
+///
+/// A budget of 128/sec is RECOMMENDED as a default (Section 10.3), matching
+/// the sender-side pacing budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RateLimit {
+    pub per_sec: u32,
+    pub burst: u32,
+}
+
+impl RateLimit {
+    pub const RECOMMENDED_DEFAULT: RateLimit = RateLimit { per_sec: 128, burst: 128 };
+}
+
+/// Token bucket implementing one [`RateLimit`].
+///
+/// # Where this sits relative to authentication
+///
+/// Section 7.4 is explicit that steps 1-6 are filters only and that a
+/// receiver "MUST NOT mutate any persistent state ... until step 7 [MAC
+/// verification] has succeeded", naming "peer liveness timers" as an example
+/// of what that covers. A token bucket is exactly that shape of state, so
+/// this type is only ever consulted -- and only ever consumes a token --
+/// *after* a datagram has already authenticated and passed its replay check.
+/// `PeerState::accept` enforces that ordering; this type has no way to see a
+/// datagram earlier than that on its own.
+///
+/// That placement is consistent with Section 10.3's own words: the limit is
+/// "enforced after authentication". It is also the reading under which this
+/// limiter protects what Section 10.3 says it protects -- receiver resources
+/// against "a compromised or malfunctioning node" -- since only genuinely
+/// authenticated traffic from a real peer ever reaches it.
+///
+/// It is worth being explicit about what this placement does *not* give you.
+/// Section 8.1.1 justifies the 4-byte tag of `cipher_id` 0x04 by a forgery-rate
+/// argument -- "each attempt is a datagram the receiver counts" -- but a
+/// forged datagram fails step 7 and therefore never reaches this limiter, so
+/// nothing here bounds an attacker's *attempt* rate against a known
+/// `sender_id`. The two requirements (Section 7.4's no-state-before-auth MUST,
+/// and Section 8.1.1's forgery-rate MUST) cannot both be literally satisfied
+/// by one post-authentication counter, and this implementation follows the
+/// explicit MUST over the informal justification. See the tracking issue for
+/// the spec question this raises.
+#[derive(Debug, Clone)]
+pub struct InboundLimiter {
+    per_sec: u32,
+    capacity_micro: u64,
+    tokens_micro: u64,
+    last_ms: u64,
+}
+
+impl InboundLimiter {
+    pub fn new(limit: RateLimit) -> Self {
+        let capacity_micro = (limit.burst.max(1) as u64) * 1_000_000;
+        Self { per_sec: limit.per_sec, capacity_micro, tokens_micro: capacity_micro, last_ms: 0 }
+    }
+
+    /// Attempt to spend one token at `now_ms`, a caller-supplied monotonic
+    /// millisecond clock (this type reads no clock of its own, matching
+    /// `Pacer`). A backward step in `now_ms` is treated as zero elapsed time
+    /// rather than negative refill.
+    pub fn try_acquire(&mut self, now_ms: u64) -> bool {
+        let elapsed_ms = now_ms.saturating_sub(self.last_ms);
+        self.last_ms = now_ms;
+        let refill = (self.per_sec as u64).saturating_mul(1000).saturating_mul(elapsed_ms);
+        self.tokens_micro = (self.tokens_micro + refill).min(self.capacity_micro);
+        if self.tokens_micro >= 1_000_000 {
+            self.tokens_micro -= 1_000_000;
+            true
+        } else {
+            false
         }
     }
 }
