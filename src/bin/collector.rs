@@ -1,6 +1,6 @@
 //! CATP reference collector: verifies datagrams and prints accepted records.
 //!
-//! Usage: catp-collector [bind_addr]
+//! Usage: catp-collector \[bind_addr\]
 //!
 //! Implements the receiver obligations of PROTOCOL.md 7.4: checks in order,
 //! no persistent state mutated before the MAC verifies, silent discard on
