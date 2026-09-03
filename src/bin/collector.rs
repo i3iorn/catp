@@ -1,6 +1,6 @@
 //! CATP reference collector: verifies datagrams and prints accepted records.
 //!
-//! Usage: catp-collector [bind_addr]
+//! Usage: catp-collector \[bind_addr\]
 //!
 //! Implements the receiver obligations of PROTOCOL.md 7.4: checks in order,
 //! no persistent state mutated before the MAC verifies, silent discard on
@@ -25,6 +25,10 @@ fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).expect("clock before 1970").as_secs()
 }
 
+fn now_ms() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).expect("clock before 1970").as_millis() as u64
+}
+
 #[derive(Default)]
 struct Stats {
     accepted: u64,
@@ -33,6 +37,8 @@ struct Stats {
     framing: u64,
     other: u64,
     skipped_records: u64,
+    // PROTOCOL.md 10.3: "counted rather than silently absorbed."
+    rate_limited: u64,
 }
 
 fn label(mt: MsgType) -> &'static str {
@@ -128,20 +134,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // A real collector serves many nodes; state is allocated here at
     // provisioning time, never on first contact (PROTOCOL.md 12.5).
     let mut collector = Collector::new();
-    collector.provision(PeerConfig {
-        sender_id: SENDER_ID,
-        secret: DeviceSecret::new(SECRET),
-        cipher: CIPHER,
-        layouts: vec![
-            (Format::None as u8, SENSOR_SCHEMA),
-            (Format::None as u8, EVENT_SCHEMA),
-            (Format::None as u8, ALARM_SCHEMA),
-            // Without this pair the unstructured records are discarded
-            // unread, exactly like any other layout the receiver does not
-            // hold (PROTOCOL.md 6.4.2.2).
-            (Format::None as u8, UNSTRUCTURED),
-        ],
-    });
+    collector
+        .provision(PeerConfig {
+            sender_id: SENDER_ID,
+            secret: DeviceSecret::new(SECRET),
+            cipher: CIPHER,
+            layouts: vec![
+                (Format::None as u8, SENSOR_SCHEMA),
+                (Format::None as u8, EVENT_SCHEMA),
+                (Format::None as u8, ALARM_SCHEMA),
+                // Without this pair the unstructured records are discarded
+                // unread, exactly like any other layout the receiver does not
+                // hold (PROTOCOL.md 6.4.2.2).
+                (Format::None as u8, UNSTRUCTURED),
+            ],
+            // Mandatory for CIPHER's 4-byte tag: without this, provision()
+            // itself refuses (PROTOCOL.md 8.1.1). RECOMMENDED_DEFAULT is the
+            // 128/sec §10.3 names.
+            inbound_rate_limit: Some(RateLimit::RECOMMENDED_DEFAULT),
+        })
+        .expect("CIPHER requires an inbound_rate_limit, and one is configured above");
 
     let sock = UdpSocket::bind(&bind)?;
     eprintln!(
@@ -157,7 +169,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (n, from) = sock.recv_from(&mut buf)?;
         let local_epoch = epoch_id_at(now_secs());
 
-        match collector.accept(&buf[..n], local_epoch, Direction::NodeToCollector) {
+        match collector.accept(&buf[..n], local_epoch, Direction::NodeToCollector, now_ms()) {
             Ok(acc) => {
                 stats.accepted += 1;
                 stats.skipped_records += acc.skipped.len() as u64;
@@ -199,21 +211,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Err(Error::AuthFailed) => stats.auth_failed += 1,
             Err(Error::Replay) => stats.replayed += 1,
             Err(Error::Framing(_)) | Err(Error::BadNumber(_)) => stats.framing += 1,
+            // Already authenticated and replay-checked; discarded for budget
+            // (PROTOCOL.md 10.3), not for authenticity.
+            Err(Error::RateLimited) => stats.rate_limited += 1,
             Err(_) => stats.other += 1,
         }
 
-        if (stats.accepted + stats.auth_failed + stats.replayed + stats.framing + stats.other)
+        if (stats.accepted
+            + stats.auth_failed
+            + stats.replayed
+            + stats.framing
+            + stats.other
+            + stats.rate_limited)
             % 20
             == 0
         {
             eprintln!(
                 "[stats] accepted={} auth_failed={} replayed={} framing={} other={} \
-                 skipped_records={}",
+                 rate_limited={} skipped_records={}",
                 stats.accepted,
                 stats.auth_failed,
                 stats.replayed,
                 stats.framing,
                 stats.other,
+                stats.rate_limited,
                 stats.skipped_records
             );
         }

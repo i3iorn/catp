@@ -18,22 +18,41 @@ pub struct PeerState {
     windows: HashMap<u32, ReplayWindow>,
     window_entries: u32,
     highest_epoch_announced: Option<u32>,
+    /// `None` unless `config.inbound_rate_limit` was set; see
+    /// [`CipherId::requires_inbound_rate_limit`] for when it must be.
+    limiter: Option<InboundLimiter>,
+    /// Datagrams that authenticated and passed replay but were discarded for
+    /// budget (PROTOCOL.md 10.3: "counted rather than silently absorbed").
+    rate_limited: u64,
 }
 
 impl PeerState {
-    pub fn new(config: PeerConfig) -> Self {
+    /// Builds the state for one provisioned peer.
+    ///
+    /// Fails with [`Error::CipherRequiresRateLimit`] if `config.cipher`
+    /// requires an inbound limit (PROTOCOL.md 8.1.1) and
+    /// `config.inbound_rate_limit` is `None`. This is the "deployments MUST
+    /// NOT select it where that limit cannot be enforced" half of Section
+    /// 8.1.1, checked at the one place that can actually enforce it.
+    pub fn new(config: PeerConfig) -> Result<Self, Error> {
         Self::with_window(config, TICKS_PER_SEC as u32)
     }
 
     /// `entries` is a duration: offsets are clock ticks, so N entries is
     /// `N / 4096` seconds of reordering tolerance (PROTOCOL.md 10.2).
-    pub fn with_window(config: PeerConfig, entries: u32) -> Self {
-        Self {
+    pub fn with_window(config: PeerConfig, entries: u32) -> Result<Self, Error> {
+        if config.cipher.requires_inbound_rate_limit() && config.inbound_rate_limit.is_none() {
+            return Err(Error::CipherRequiresRateLimit(config.cipher as u8));
+        }
+        let limiter = config.inbound_rate_limit.map(InboundLimiter::new);
+        Ok(Self {
             config,
             windows: HashMap::new(),
             window_entries: entries,
             highest_epoch_announced: None,
-        }
+            limiter,
+            rate_limited: 0,
+        })
     }
 
     /// Windows for epochs outside the acceptance window are discarded
@@ -43,11 +62,18 @@ impl PeerState {
     }
 
     /// Verify one datagram from this peer.
+    ///
+    /// `now_ms` is a caller-supplied monotonic millisecond clock, read by
+    /// nothing in this crate (matching [`Pacer`]), and is spent against the
+    /// inbound rate limit only *after* `decode` has already authenticated and
+    /// replay-checked the datagram -- see [`InboundLimiter`] for why that
+    /// ordering is load-bearing, not incidental.
     pub fn accept(
         &mut self,
         buf: &[u8],
         local_epoch: u32,
         dir: Direction,
+        now_ms: u64,
     ) -> Result<Accepted, Error> {
         if buf.len() < HEADER_LEN {
             return Err(Error::TooShort);
@@ -63,7 +89,20 @@ impl PeerState {
             .windows
             .entry(epoch)
             .or_insert_with(|| ReplayWindow::new(entries));
-        decode(buf, &self.config, local_epoch, dir, window)
+        let accepted = decode(buf, &self.config, local_epoch, dir, window)?;
+        if let Some(limiter) = &mut self.limiter
+            && !limiter.try_acquire(now_ms)
+        {
+            self.rate_limited += 1;
+            return Err(Error::RateLimited);
+        }
+        Ok(accepted)
+    }
+
+    /// Datagrams discarded for exceeding the inbound rate limit, after
+    /// authenticating successfully (PROTOCOL.md 10.3).
+    pub fn rate_limited_count(&self) -> u64 {
+        self.rate_limited
     }
 
     /// Apply an `EPOCH_ANNOUNCE` that has already been authenticated.
@@ -110,8 +149,13 @@ impl Collector {
     /// Provision a peer. PROTOCOL.md 12.5 requires state to be allocated here,
     /// not on first contact, so an attacker cannot exhaust memory by varying
     /// `sender_id`.
-    pub fn provision(&mut self, config: PeerConfig) {
-        self.peers.insert(config.sender_id, PeerState::new(config));
+    ///
+    /// Fails with [`Error::CipherRequiresRateLimit`] under the same condition
+    /// as [`PeerState::new`]; no peer is inserted in that case.
+    pub fn provision(&mut self, config: PeerConfig) -> Result<(), Error> {
+        let sender_id = config.sender_id;
+        self.peers.insert(sender_id, PeerState::new(config)?);
+        Ok(())
     }
 
     pub fn peer_mut(&mut self, sender_id: u32) -> Option<&mut PeerState> {
@@ -128,13 +172,14 @@ impl Collector {
         buf: &[u8],
         local_epoch: u32,
         dir: Direction,
+        now_ms: u64,
     ) -> Result<Accepted, Error> {
         if buf.len() < HEADER_LEN {
             return Err(Error::TooShort);
         }
         let sender_id = u32::from_be_bytes([buf[5], buf[6], buf[7], buf[8]]);
         let peer = self.peers.get_mut(&sender_id).ok_or(Error::UnknownSender(sender_id))?;
-        peer.accept(buf, local_epoch, dir)
+        peer.accept(buf, local_epoch, dir, now_ms)
     }
 }
 
@@ -258,12 +303,13 @@ mod tests {
             secret: DeviceSecret::new([(id & 0xFF) as u8; 32]),
             cipher: CipherId::HmacSha256T32,
             layouts: vec![(Format::None as u8, 1)],
+            inbound_rate_limit: Some(RateLimit::RECOMMENDED_DEFAULT),
         }
     }
 
     #[test]
     fn epoch_announce_is_monotonic() {
-        let mut p = PeerState::new(cfg(1));
+        let mut p = PeerState::new(cfg(1)).unwrap();
         assert!(p.accept_epoch_announce(100).is_ok());
         assert!(p.accept_epoch_announce(101).is_ok());
         // Replay of an older announcement must not roll the epoch back.
@@ -280,14 +326,16 @@ mod tests {
             secret: secret.clone(),
             cipher: CipherId::HmacSha256T32,
             layouts: vec![(Format::None as u8, 1)],
-        });
+            inbound_rate_limit: Some(RateLimit::RECOMMENDED_DEFAULT),
+        })
+        .unwrap();
         let e = 1000u32;
         // Same offset in two adjacent epochs: both accepted, because offsets
         // reset each epoch and each epoch has its own window.
         for epoch in [e - 1, e] {
             let dg = Datagram::number(CipherId::HmacSha256T32, 1, epoch, 4242, "1.5").unwrap();
             let w = dg.encode(&secret, epoch, Direction::NodeToCollector, MAX_DATAGRAM_IPV4).unwrap();
-            assert!(st.accept(&w, e, Direction::NodeToCollector).is_ok(), "epoch {epoch}");
+            assert!(st.accept(&w, e, Direction::NodeToCollector, 0).is_ok(), "epoch {epoch}");
         }
         assert_eq!(st.live_windows(), 2, "acceptance window is exactly two epochs wide");
     }
@@ -300,11 +348,13 @@ mod tests {
             secret: secret.clone(),
             cipher: CipherId::HmacSha256T32,
             layouts: vec![(Format::None as u8, 1)],
-        });
+            inbound_rate_limit: Some(RateLimit::RECOMMENDED_DEFAULT),
+        })
+        .unwrap();
         for epoch in 1000..1010u32 {
             let dg = Datagram::number(CipherId::HmacSha256T32, 1, epoch, 7, "1").unwrap();
             let w = dg.encode(&secret, epoch, Direction::NodeToCollector, MAX_DATAGRAM_IPV4).unwrap();
-            st.accept(&w, epoch, Direction::NodeToCollector).unwrap();
+            st.accept(&w, epoch, Direction::NodeToCollector, 0).unwrap();
             assert!(st.live_windows() <= 2, "epoch {epoch}: {} windows", st.live_windows());
         }
     }
@@ -312,8 +362,8 @@ mod tests {
     #[test]
     fn collector_routes_by_sender_and_rejects_unknown() {
         let mut c = Collector::new();
-        c.provision(cfg(0xAAAA));
-        c.provision(cfg(0xBBBB));
+        c.provision(cfg(0xAAAA)).unwrap();
+        c.provision(cfg(0xBBBB)).unwrap();
         let e = 500u32;
 
         for id in [0xAAAAu32, 0xBBBB] {
@@ -321,7 +371,7 @@ mod tests {
             let w = dg
                 .encode(&cfg(id).secret, e, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
                 .unwrap();
-            let acc = c.accept(&w, e, Direction::NodeToCollector).unwrap();
+            let acc = c.accept(&w, e, Direction::NodeToCollector, 0).unwrap();
             assert_eq!(acc.datagram.sender_id, id);
         }
 
@@ -331,7 +381,7 @@ mod tests {
             .encode(&cfg(0xCCCC).secret, e, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
             .unwrap();
         assert_eq!(
-            c.accept(&w, e, Direction::NodeToCollector).unwrap_err(),
+            c.accept(&w, e, Direction::NodeToCollector, 0).unwrap_err(),
             Error::UnknownSender(0xCCCC)
         );
     }
@@ -339,14 +389,75 @@ mod tests {
     #[test]
     fn one_senders_key_cannot_sign_for_another() {
         let mut c = Collector::new();
-        c.provision(cfg(0xAAAA));
+        c.provision(cfg(0xAAAA)).unwrap();
         let e = 500u32;
         // Claim to be AAAA but sign with BBBB's secret (PROTOCOL.md 9.2.1).
         let dg = Datagram::number(CipherId::HmacSha256T32, 0xAAAA, e, 5, "1").unwrap();
         let w = dg
             .encode(&cfg(0xBBBB).secret, e, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
             .unwrap();
-        assert_eq!(c.accept(&w, e, Direction::NodeToCollector).unwrap_err(), Error::AuthFailed);
+        assert_eq!(c.accept(&w, e, Direction::NodeToCollector, 0).unwrap_err(), Error::AuthFailed);
+    }
+
+    #[test]
+    fn cipher_0x04_without_a_rate_limit_is_refused_at_construction() {
+        let mut c = cfg(1);
+        c.inbound_rate_limit = None;
+        match PeerState::new(c) {
+            Err(e) => assert_eq!(e, Error::CipherRequiresRateLimit(CipherId::HmacSha256T32 as u8)),
+            Ok(_) => panic!("expected CipherRequiresRateLimit"),
+        }
+    }
+
+    #[test]
+    fn cipher_0x01_needs_no_rate_limit() {
+        let mut c = cfg(1);
+        c.cipher = CipherId::HmacSha256T64;
+        c.inbound_rate_limit = None;
+        assert!(PeerState::new(c).is_ok());
+    }
+
+    #[test]
+    fn exceeding_the_inbound_limit_discards_authenticated_traffic_and_counts_it() {
+        let secret = DeviceSecret::new([1u8; 32]);
+        let mut st = PeerState::new(PeerConfig {
+            sender_id: 1,
+            secret: secret.clone(),
+            cipher: CipherId::HmacSha256T32,
+            layouts: vec![(Format::None as u8, 1)],
+            inbound_rate_limit: Some(RateLimit { per_sec: 10, burst: 2 }),
+        })
+        .unwrap();
+        let e = 2000u32;
+        let send = |off: u32| {
+            Datagram::number(CipherId::HmacSha256T32, 1, e, off, "1")
+                .unwrap()
+                .encode(&secret, e, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
+                .unwrap()
+        };
+
+        // Burst of 2 spends the full bucket; a third at the same instant is
+        // discarded for budget, not for authenticity.
+        assert!(st.accept(&send(1), e, Direction::NodeToCollector, 0).is_ok());
+        assert!(st.accept(&send(2), e, Direction::NodeToCollector, 0).is_ok());
+        assert_eq!(
+            st.accept(&send(3), e, Direction::NodeToCollector, 0).unwrap_err(),
+            Error::RateLimited
+        );
+        assert_eq!(st.rate_limited_count(), 1);
+
+        // A discarded datagram still consumed its offset and its replay slot
+        // (PROTOCOL.md 7.4: the offset was genuinely used), so replaying it
+        // fails as a replay, not as a second rate-limit discard.
+        assert_eq!(
+            st.accept(&send(3), e, Direction::NodeToCollector, 0).unwrap_err(),
+            Error::Replay
+        );
+
+        // Waiting for the bucket to refill (10/sec => 100ms per token) admits
+        // the next one.
+        assert!(st.accept(&send(4), e, Direction::NodeToCollector, 100).is_ok());
+        assert_eq!(st.rate_limited_count(), 1);
     }
 
     #[test]

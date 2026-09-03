@@ -20,6 +20,12 @@ fn cfg(id: u32, seed: u8, cipher: CipherId) -> PeerConfig {
         secret: secret(seed),
         cipher,
         layouts: vec![(Format::None as u8, SCHEMA), (Format::Cbor as u8, SCHEMA)],
+        // Generous on purpose: these are end-to-end scenarios, not rate-limit
+        // tests (that coverage is peer.rs's
+        // exceeding_the_inbound_limit_discards_authenticated_traffic_and_counts_it,
+        // plus rate_limit_is_enforced_through_the_collector below), so no test
+        // here should incidentally trip the limit mid-scenario.
+        inbound_rate_limit: Some(RateLimit { per_sec: 1_000_000, burst: 1_000_000 }),
     }
 }
 
@@ -34,7 +40,7 @@ fn rec(body: &[u8]) -> Record {
 #[test]
 fn usecase_single_value_node() {
     let mut col = Collector::new();
-    col.provision(cfg(NODE, 1, CipherId::HmacSha256T32));
+    col.provision(cfg(NODE, 1, CipherId::HmacSha256T32)).unwrap();
 
     let epoch = epoch_id_at(1_700_000_000);
     let readings = ["21.5", "21.6", "-0.5", "0", "1013.25"];
@@ -47,7 +53,7 @@ fn usecase_single_value_node() {
             .encode(&secret(1), epoch, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
             .unwrap();
         wire_total += w.len();
-        let acc = col.accept(&w, epoch, Direction::NodeToCollector).unwrap();
+        let acc = col.accept(&w, epoch, Direction::NodeToCollector, 0).unwrap();
         assert_eq!(acc.datagram.number_literal(), Some(*r));
         assert_eq!(acc.datagram_offset, off);
     }
@@ -62,7 +68,7 @@ fn usecase_single_value_node() {
 #[test]
 fn usecase_multisensor_batch() {
     let mut col = Collector::new();
-    col.provision(cfg(NODE, 1, CipherId::HmacSha256T32));
+    col.provision(cfg(NODE, 1, CipherId::HmacSha256T32)).unwrap();
     let epoch = epoch_id_at(1_700_000_000);
 
     let records: Vec<Record> = (0..8u16)
@@ -83,7 +89,7 @@ fn usecase_multisensor_batch() {
 
     // 9 header + 8*(3 record header + 3 body) + 4 tag
     assert_eq!(w.len(), 9 + 8 * 6 + 4);
-    let acc = col.accept(&w, epoch, Direction::NodeToCollector).unwrap();
+    let acc = col.accept(&w, epoch, Direction::NodeToCollector, 0).unwrap();
     assert_eq!(acc.datagram.records.len(), 8);
     // Every record shares the datagram's instant (PROTOCOL.md 6.4.1).
     assert_eq!(acc.datagram_offset, 500);
@@ -157,10 +163,10 @@ fn usecase_cold_start_then_transmit() {
     // Now it can transmit, and the collector accepts.
     let epoch = epoch_id_at(clock.now(0).unwrap() as u64);
     let mut col = Collector::new();
-    col.provision(cfg(NODE, 1, CipherId::HmacSha256T32));
+    col.provision(cfg(NODE, 1, CipherId::HmacSha256T32)).unwrap();
     let dg = Datagram::number(CipherId::HmacSha256T32, NODE, epoch, 128, "5.0").unwrap();
     let w = dg.encode(&s, epoch, Direction::NodeToCollector, MAX_DATAGRAM_IPV4).unwrap();
-    assert!(col.accept(&w, epoch, Direction::NodeToCollector).is_ok());
+    assert!(col.accept(&w, epoch, Direction::NodeToCollector, 0).is_ok());
 }
 
 /// A collector-to-node control message. The node is named in both directions
@@ -169,7 +175,7 @@ fn usecase_cold_start_then_transmit() {
 fn usecase_collector_to_node_direction() {
     let s = secret(1);
     let epoch = epoch_id_at(1_700_000_000);
-    let mut node_side = PeerState::new(cfg(NODE, 1, CipherId::HmacSha256T32));
+    let mut node_side = PeerState::new(cfg(NODE, 1, CipherId::HmacSha256T32)).unwrap();
 
     let body = Control::EpochAnnounce { target_epoch: epoch + 1 }.encode().unwrap();
     let dg =
@@ -178,7 +184,7 @@ fn usecase_collector_to_node_direction() {
     let w = dg.encode(&s, epoch, Direction::CollectorToNode, MAX_DATAGRAM_IPV4).unwrap();
 
     // Verified in the collector-to-node direction: accepted.
-    let acc = node_side.accept(&w, epoch, Direction::CollectorToNode).unwrap();
+    let acc = node_side.accept(&w, epoch, Direction::CollectorToNode, 0).unwrap();
     match Control::parse(MsgType::EpochAnnounce, &acc.datagram.raw).unwrap() {
         Control::EpochAnnounce { target_epoch } => assert_eq!(target_epoch, epoch + 1),
         other => panic!("unexpected {other:?}"),
@@ -186,9 +192,9 @@ fn usecase_collector_to_node_direction() {
 
     // The same bytes reflected back as node-to-collector must fail: that is
     // exactly what the direction byte exists to prevent.
-    let mut fresh = PeerState::new(cfg(NODE, 1, CipherId::HmacSha256T32));
+    let mut fresh = PeerState::new(cfg(NODE, 1, CipherId::HmacSha256T32)).unwrap();
     assert_eq!(
-        fresh.accept(&w, epoch, Direction::NodeToCollector).unwrap_err(),
+        fresh.accept(&w, epoch, Direction::NodeToCollector, 0).unwrap_err(),
         Error::AuthFailed
     );
 }
@@ -200,7 +206,7 @@ fn usecase_collector_to_node_direction() {
 #[test]
 fn reordered_delivery_is_accepted_replay_is_not() {
     let mut col = Collector::new();
-    col.provision(cfg(NODE, 1, CipherId::HmacSha256T32));
+    col.provision(cfg(NODE, 1, CipherId::HmacSha256T32)).unwrap();
     let epoch = epoch_id_at(1_700_000_000);
 
     let wires: Vec<Vec<u8>> = (1..=5u32)
@@ -215,14 +221,14 @@ fn reordered_delivery_is_accepted_replay_is_not() {
     // Deliver out of order: 3, 1, 5, 2, 4.
     for idx in [2usize, 0, 4, 1, 3] {
         assert!(
-            col.accept(&wires[idx], epoch, Direction::NodeToCollector).is_ok(),
+            col.accept(&wires[idx], epoch, Direction::NodeToCollector, 0).is_ok(),
             "reordered delivery of {idx} rejected"
         );
     }
     // Every one of them is now a replay.
     for (i, w) in wires.iter().enumerate() {
         assert_eq!(
-            col.accept(w, epoch, Direction::NodeToCollector).unwrap_err(),
+            col.accept(w, epoch, Direction::NodeToCollector, 0).unwrap_err(),
             Error::Replay,
             "datagram {i} accepted twice"
         );
@@ -234,7 +240,7 @@ fn reordered_delivery_is_accepted_replay_is_not() {
 #[test]
 fn loss_leaves_no_trace() {
     let mut col = Collector::new();
-    col.provision(cfg(NODE, 1, CipherId::HmacSha256T32));
+    col.provision(cfg(NODE, 1, CipherId::HmacSha256T32)).unwrap();
     let epoch = epoch_id_at(1_700_000_000);
 
     let mut delivered = 0;
@@ -246,7 +252,7 @@ fn loss_leaves_no_trace() {
         if i % 3 == 0 {
             continue; // dropped in flight
         }
-        assert!(col.accept(&w, epoch, Direction::NodeToCollector).is_ok());
+        assert!(col.accept(&w, epoch, Direction::NodeToCollector, 0).is_ok());
         delivered += 1;
     }
     assert_eq!(delivered, 100 - 33);
@@ -257,7 +263,7 @@ fn loss_leaves_no_trace() {
 #[test]
 fn epoch_rollover_accepts_previous_rejects_older() {
     let mut col = Collector::new();
-    col.provision(cfg(NODE, 1, CipherId::HmacSha256T32));
+    col.provision(cfg(NODE, 1, CipherId::HmacSha256T32)).unwrap();
     let now = 13_281_250u32;
 
     for (sent_in, want_ok) in [(now, true), (now - 1, true), (now - 2, false), (now - 5, false)] {
@@ -265,7 +271,7 @@ fn epoch_rollover_accepts_previous_rejects_older() {
             .unwrap()
             .encode(&secret(1), sent_in, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
             .unwrap();
-        let got = col.accept(&w, now, Direction::NodeToCollector);
+        let got = col.accept(&w, now, Direction::NodeToCollector, 0);
         assert_eq!(got.is_ok(), want_ok, "epoch {sent_in} vs local {now}: {got:?}");
     }
 }
@@ -275,14 +281,14 @@ fn epoch_rollover_accepts_previous_rejects_older() {
 #[test]
 fn same_offset_in_adjacent_epochs_is_not_a_replay() {
     let mut col = Collector::new();
-    col.provision(cfg(NODE, 1, CipherId::HmacSha256T32));
+    col.provision(cfg(NODE, 1, CipherId::HmacSha256T32)).unwrap();
     let now = 13_281_250u32;
     for epoch in [now - 1, now] {
         let w = Datagram::number(CipherId::HmacSha256T32, NODE, epoch, 12345, "9")
             .unwrap()
             .encode(&secret(1), epoch, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
             .unwrap();
-        assert!(col.accept(&w, now, Direction::NodeToCollector).is_ok(), "epoch {epoch}");
+        assert!(col.accept(&w, now, Direction::NodeToCollector, 0).is_ok(), "epoch {epoch}");
     }
 }
 
@@ -293,8 +299,8 @@ fn same_offset_in_adjacent_epochs_is_not_a_replay() {
 #[test]
 fn compromised_node_cannot_impersonate_another() {
     let mut col = Collector::new();
-    col.provision(cfg(NODE, 1, CipherId::HmacSha256T32));
-    col.provision(cfg(OTHER, 2, CipherId::HmacSha256T32));
+    col.provision(cfg(NODE, 1, CipherId::HmacSha256T32)).unwrap();
+    col.provision(cfg(OTHER, 2, CipherId::HmacSha256T32)).unwrap();
     let epoch = epoch_id_at(1_700_000_000);
 
     // Attacker holds node 2's secret and forges traffic claiming to be node 1.
@@ -303,7 +309,7 @@ fn compromised_node_cannot_impersonate_another() {
         .encode(&secret(2), epoch, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
         .unwrap();
     assert_eq!(
-        col.accept(&forged, epoch, Direction::NodeToCollector).unwrap_err(),
+        col.accept(&forged, epoch, Direction::NodeToCollector, 0).unwrap_err(),
         Error::AuthFailed
     );
 }
@@ -313,7 +319,7 @@ fn compromised_node_cannot_impersonate_another() {
 #[test]
 fn cipher_downgrade_is_refused_pre_mac() {
     let mut col = Collector::new();
-    col.provision(cfg(NODE, 1, CipherId::HmacSha256T32)); // configured: 4-byte tag
+    col.provision(cfg(NODE, 1, CipherId::HmacSha256T32)).unwrap(); // configured: 4-byte tag
     let epoch = epoch_id_at(1_700_000_000);
 
     let w = Datagram::number(CipherId::HmacSha256T64, NODE, epoch, 5, "1")
@@ -321,7 +327,7 @@ fn cipher_downgrade_is_refused_pre_mac() {
         .encode(&secret(1), epoch, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
         .unwrap();
     assert_eq!(
-        col.accept(&w, epoch, Direction::NodeToCollector).unwrap_err(),
+        col.accept(&w, epoch, Direction::NodeToCollector, 0).unwrap_err(),
         Error::CipherMismatch { got: 0x01, want: 0x04 }
     );
 }
@@ -330,7 +336,7 @@ fn cipher_downgrade_is_refused_pre_mac() {
 #[test]
 fn every_truncation_is_rejected() {
     let mut col = Collector::new();
-    col.provision(cfg(NODE, 1, CipherId::HmacSha256T32));
+    col.provision(cfg(NODE, 1, CipherId::HmacSha256T32)).unwrap();
     let epoch = epoch_id_at(1_700_000_000);
     let full = Datagram::data(
         MsgType::Message,
@@ -346,25 +352,25 @@ fn every_truncation_is_rejected() {
 
     for n in 0..full.len() {
         assert!(
-            col.accept(&full[..n], epoch, Direction::NodeToCollector).is_err(),
+            col.accept(&full[..n], epoch, Direction::NodeToCollector, 0).is_err(),
             "truncation to {n} bytes was accepted"
         );
     }
-    assert!(col.accept(&full, epoch, Direction::NodeToCollector).is_ok());
+    assert!(col.accept(&full, epoch, Direction::NodeToCollector, 0).is_ok());
 }
 
 /// Extension past the tag must be rejected too.
 #[test]
 fn appended_bytes_are_rejected() {
     let mut col = Collector::new();
-    col.provision(cfg(NODE, 1, CipherId::HmacSha256T32));
+    col.provision(cfg(NODE, 1, CipherId::HmacSha256T32)).unwrap();
     let epoch = epoch_id_at(1_700_000_000);
     let mut w = Datagram::number(CipherId::HmacSha256T32, NODE, epoch, 3, "1.25")
         .unwrap()
         .encode(&secret(1), epoch, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
         .unwrap();
     w.push(0x00);
-    assert!(col.accept(&w, epoch, Direction::NodeToCollector).is_err());
+    assert!(col.accept(&w, epoch, Direction::NodeToCollector, 0).is_err());
 }
 
 /// A TIME_ANNOUNCE for one node must not verify at another, and a bit-flip
@@ -397,7 +403,7 @@ fn time_announce_is_bound_to_its_node_and_tamper_evident() {
 #[test]
 fn time_announce_rejected_by_ordinary_decode() {
     let mut col = Collector::new();
-    col.provision(cfg(NODE, 1, CipherId::HmacSha256T64));
+    col.provision(cfg(NODE, 1, CipherId::HmacSha256T64)).unwrap();
     let wire = Datagram::time_announce(NODE, 1_700_000_000, &secret(1)).unwrap();
 
     // TIME_ANNOUNCE pins epoch_low to 0, so pick a local epoch whose low nibble
@@ -405,13 +411,13 @@ fn time_announce_rejected_by_ordinary_decode() {
     // first and we would not be testing the msg_type rejection at all.
     let epoch = epoch_id_at(1_700_000_000) & !0x0F;
     assert!(matches!(
-        col.accept(&wire, epoch, Direction::NodeToCollector),
+        col.accept(&wire, epoch, Direction::NodeToCollector, 0),
         Err(Error::BadMsgType(_))
     ));
 
     // With any other local epoch it is still rejected, just by the cheaper
     // pre-MAC epoch filter.
-    assert!(col.accept(&wire, epoch + 5, Direction::NodeToCollector).is_err());
+    assert!(col.accept(&wire, epoch + 5, Direction::NodeToCollector, 0).is_err());
 }
 
 // ------------------------------------------------------------------- framing
@@ -423,12 +429,12 @@ fn both_implemented_ciphers_round_trip() {
     let mut lens = vec![];
     for c in [CipherId::HmacSha256T32, CipherId::HmacSha256T64] {
         let mut col = Collector::new();
-        col.provision(cfg(NODE, 1, c));
+        col.provision(cfg(NODE, 1, c)).unwrap();
         let w = Datagram::number(c, NODE, epoch, 21, "3.5")
             .unwrap()
             .encode(&secret(1), epoch, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
             .unwrap();
-        assert!(col.accept(&w, epoch, Direction::NodeToCollector).is_ok());
+        assert!(col.accept(&w, epoch, Direction::NodeToCollector, 0).is_ok());
         lens.push(w.len());
     }
     assert_eq!(lens[1] - lens[0], 4, "0x01 carries 4 more tag bytes than 0x04");
@@ -439,7 +445,7 @@ fn both_implemented_ciphers_round_trip() {
 #[test]
 fn reserved_format_skips_one_record() {
     let mut col = Collector::new();
-    col.provision(cfg(NODE, 1, CipherId::HmacSha256T32));
+    col.provision(cfg(NODE, 1, CipherId::HmacSha256T32)).unwrap();
     let epoch = epoch_id_at(1_700_000_000);
 
     let mut odd = rec(b"??");
@@ -456,7 +462,7 @@ fn reserved_format_skips_one_record() {
     .encode(&secret(1), epoch, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
     .unwrap();
 
-    let acc = col.accept(&w, epoch, Direction::NodeToCollector).unwrap();
+    let acc = col.accept(&w, epoch, Direction::NodeToCollector, 0).unwrap();
     assert_eq!(acc.datagram.records.len(), 2);
     assert_eq!(acc.skipped.len(), 1);
     assert_eq!(acc.skipped[0].format, 0x0B);
@@ -480,14 +486,14 @@ fn oversize_fails_at_the_sender() {
 #[test]
 fn offset_extremes_round_trip() {
     let mut col = Collector::new();
-    col.provision(cfg(NODE, 1, CipherId::HmacSha256T32));
+    col.provision(cfg(NODE, 1, CipherId::HmacSha256T32)).unwrap();
     let epoch = epoch_id_at(1_700_000_000);
     for off in [0u32, 1, 4095, 4096, 65_535, 65_536, 524_286, TICKS_PER_EPOCH - 1] {
         let w = Datagram::number(CipherId::HmacSha256T32, NODE, epoch, off, "1")
             .unwrap()
             .encode(&secret(1), epoch, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
             .unwrap();
-        let acc = col.accept(&w, epoch, Direction::NodeToCollector).unwrap();
+        let acc = col.accept(&w, epoch, Direction::NodeToCollector, 0).unwrap();
         assert_eq!(acc.datagram_offset, off);
     }
     // Beyond the field is a construction error, not a silent truncation.
@@ -521,8 +527,8 @@ fn unstructured_still_has_to_be_provisioned() {
 
     // Not provisioned: the unstructured record is skipped, the rest survives.
     let mut col = Collector::new();
-    col.provision(cfg(NODE, 1, CipherId::HmacSha256T32));
-    let acc = col.accept(&build(), epoch, Direction::NodeToCollector).unwrap();
+    col.provision(cfg(NODE, 1, CipherId::HmacSha256T32)).unwrap();
+    let acc = col.accept(&build(), epoch, Direction::NodeToCollector, 0).unwrap();
     assert_eq!(acc.datagram.records.len(), 1);
     assert_eq!(acc.skipped.len(), 1);
     assert_eq!(acc.skipped[0].schema_version, SCHEMA_UNSTRUCTURED);
@@ -531,10 +537,37 @@ fn unstructured_still_has_to_be_provisioned() {
     let mut col = Collector::new();
     let mut c = cfg(NODE, 1, CipherId::HmacSha256T32);
     c.layouts.push((Format::None as u8, SCHEMA_UNSTRUCTURED));
-    col.provision(c);
-    let acc = col.accept(&build(), epoch, Direction::NodeToCollector).unwrap();
+    col.provision(c).unwrap();
+    let acc = col.accept(&build(), epoch, Direction::NodeToCollector, 0).unwrap();
     assert_eq!(acc.datagram.records.len(), 2);
     assert!(acc.skipped.is_empty());
     assert_eq!(acc.datagram.records[1].body, b"opaque");
     assert_eq!(acc.datagram_offset, 700);
+}
+
+/// The same limit exercised through `Collector::accept`, not just
+/// `PeerState::accept` directly -- proving the routing layer threads `now_ms`
+/// and the `RateLimited` error through unchanged (PROTOCOL.md 10.3, 8.1.1).
+#[test]
+fn rate_limit_is_enforced_through_the_collector() {
+    let epoch = epoch_id_at(1_700_000_000);
+    let mut col = Collector::new();
+    let mut c = cfg(NODE, 1, CipherId::HmacSha256T32);
+    c.inbound_rate_limit = Some(RateLimit { per_sec: 5, burst: 1 });
+    col.provision(c).unwrap();
+
+    let send = |off: u32| {
+        Datagram::number(CipherId::HmacSha256T32, NODE, epoch, off, "1")
+            .unwrap()
+            .encode(&secret(1), epoch, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
+            .unwrap()
+    };
+
+    assert!(col.accept(&send(1), epoch, Direction::NodeToCollector, 0).is_ok());
+    assert_eq!(
+        col.accept(&send(2), epoch, Direction::NodeToCollector, 0).unwrap_err(),
+        Error::RateLimited
+    );
+    // 5/sec with burst 1 refills one token every 200ms.
+    assert!(col.accept(&send(3), epoch, Direction::NodeToCollector, 200).is_ok());
 }
