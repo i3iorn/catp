@@ -569,7 +569,7 @@ mod tests {
     fn peer() -> PeerConfig {
         PeerConfig {
             sender_id: 0xDEADBEEF,
-            secret: DeviceSecret([42u8; 32]),
+            secret: DeviceSecret::new([42u8; 32]),
             cipher: CipherId::HmacSha256T32,
             layouts: vec![(Format::None as u8, 1)],
             // `decode()` is called directly in this module's tests, bypassing
@@ -728,7 +728,7 @@ mod tests {
 
     #[test]
     fn time_request_round_trips_and_is_directional() {
-        let s = DeviceSecret([3u8; 32]);
+        let s = DeviceSecret::new([3u8; 32]);
         let wire = Datagram::time_request(0x1234, &s).unwrap();
         assert_eq!(wire.len(), HEADER_LEN + 8); // no payload, 8-byte tag
         assert!(decode_time_request(&wire, 0x1234, &s).is_ok());
@@ -763,7 +763,7 @@ mod tests {
 
     #[test]
     fn time_request_is_tamper_evident() {
-        let s = DeviceSecret([3u8; 32]);
+        let s = DeviceSecret::new([3u8; 32]);
         let wire = Datagram::time_request(0x1234, &s).unwrap();
         for byte in 0..wire.len() {
             for bit in 0..8 {
