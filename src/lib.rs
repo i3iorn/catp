@@ -14,6 +14,7 @@ use hkdf::Hkdf;
 use hmac::digest::KeyInit;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
+use subtle::ConstantTimeEq;
 
 pub mod control;
 pub mod peer;
@@ -337,16 +338,28 @@ pub fn mac(cipher: CipherId, key: &[u8; 32], msg: &[u8]) -> Result<Vec<u8>, Erro
     Ok(full[..cipher.tag_len()].to_vec())
 }
 
-/// Constant-time comparison (PROTOCOL.md 7.4).
+/// Constant-time comparison (PROTOCOL.md 7.4: "Tag comparison MUST be
+/// constant-time").
+///
+/// Delegates to `subtle`, a vetted constant-time primitive, rather than a
+/// hand-rolled accumulate-then-compare loop. The accumulate-then-compare
+/// shape looks constant-time but isn't guaranteed to compile to constant-time
+/// code: nothing in the Rust language stops LLVM from noticing that the
+/// result is determined once `diff` is non-zero and introducing an early
+/// exit, or from vectorizing the loop in a way that makes timing
+/// input-dependent. `subtle` exists specifically to close that gap, with
+/// optimization barriers a hand-written loop does not get for free.
+///
+/// The length check is a plain `!=`, not constant-time, and that is correct:
+/// tag length is public (`cipher_id` announces it on the wire, unauthenticated
+/// -- Section 4.1), so comparing it in variable time leaks nothing a
+/// constant-time comparison would have hidden. Only the bytes of a
+/// same-length secret-derived tag need the protection `subtle` provides.
 pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
+    a.ct_eq(b).into()
 }
 
 // ------------------------------------------------------------------ epoch math
@@ -683,6 +696,21 @@ mod tests {
         assert!(!ct_eq(b"abcd", b"abce"));
         assert!(!ct_eq(b"abcd", b"abc"));
         assert!(ct_eq(b"", b""));
+    }
+
+    #[test]
+    fn ct_eq_catches_every_single_bit_flip() {
+        // Same shape as tampering_any_bit_fails_auth: every bit of an
+        // 8-byte tag-sized buffer, flipped one at a time, must compare
+        // unequal to the original.
+        let a = [0x5Au8; 8];
+        for byte in 0..a.len() {
+            for bit in 0..8u8 {
+                let mut b = a;
+                b[byte] ^= 1 << bit;
+                assert!(!ct_eq(&a, &b), "flip at byte {byte} bit {bit} compared equal");
+            }
+        }
     }
 
     #[test]
