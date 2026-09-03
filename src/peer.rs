@@ -255,7 +255,7 @@ mod tests {
     fn cfg(id: u32) -> PeerConfig {
         PeerConfig {
             sender_id: id,
-            secret: DeviceSecret([(id & 0xFF) as u8; 32]),
+            secret: DeviceSecret::new([(id & 0xFF) as u8; 32]),
             cipher: CipherId::HmacSha256T32,
             layouts: vec![(Format::None as u8, 1)],
         }
@@ -274,7 +274,7 @@ mod tests {
 
     #[test]
     fn windows_are_per_epoch_and_bounded() {
-        let secret = DeviceSecret([1u8; 32]);
+        let secret = DeviceSecret::new([1u8; 32]);
         let mut st = PeerState::new(PeerConfig {
             sender_id: 1,
             secret: secret.clone(),
@@ -294,7 +294,7 @@ mod tests {
 
     #[test]
     fn old_windows_are_pruned_as_the_clock_advances() {
-        let secret = DeviceSecret([1u8; 32]);
+        let secret = DeviceSecret::new([1u8; 32]);
         let mut st = PeerState::new(PeerConfig {
             sender_id: 1,
             secret: secret.clone(),

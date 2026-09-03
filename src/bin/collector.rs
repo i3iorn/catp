@@ -130,7 +130,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut collector = Collector::new();
     collector.provision(PeerConfig {
         sender_id: SENDER_ID,
-        secret: DeviceSecret(SECRET),
+        secret: DeviceSecret::new(SECRET),
         cipher: CIPHER,
         layouts: vec![
             (Format::None as u8, SENSOR_SCHEMA),

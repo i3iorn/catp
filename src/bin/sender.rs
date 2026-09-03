@@ -284,7 +284,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(4);
 
     let sock = UdpSocket::bind("0.0.0.0:0")?;
-    let secret = DeviceSecret(SECRET);
+    let secret = DeviceSecret::new(SECRET);
     let mut pacer = Pacer::new();
 
     eprintln!(
