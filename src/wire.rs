@@ -329,6 +329,13 @@ pub struct PeerConfig {
     pub cipher: CipherId,
     /// `(format, schema_version)` pairs this receiver can interpret.
     pub layouts: Vec<(u8, u8)>,
+    /// Per-`sender_id` inbound rate limit (PROTOCOL.md 10.3, 8.1.1).
+    ///
+    /// `cipher`'s [`CipherId::requires_inbound_rate_limit`] decides whether
+    /// this may be `None`: `PeerState::new` / `Collector::provision` refuse a
+    /// config that pairs a mandatory-limit cipher with no limit, rather than
+    /// silently accepting one.
+    pub inbound_rate_limit: Option<RateLimit>,
 }
 
 /// Header constraints shared by `TIME_REQUEST` and `TIME_ANNOUNCE`.
@@ -565,6 +572,10 @@ mod tests {
             secret: DeviceSecret([42u8; 32]),
             cipher: CipherId::HmacSha256T32,
             layouts: vec![(Format::None as u8, 1)],
+            // `decode()` is called directly in this module's tests, bypassing
+            // PeerState::new's invariant check -- so this may stay None even
+            // for a 0x04 peer.
+            inbound_rate_limit: None,
         }
     }
     fn rec(body: &[u8]) -> Record {
