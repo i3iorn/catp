@@ -63,10 +63,11 @@ impl Capability {
         if p.len() != 3 + nc + nl * 2 {
             return Err(Error::Framing("CAPABILITY_ADVERTISE length mismatch"));
         }
-        let layouts = p[3 + nc..]
-            .chunks_exact(2)
-            .map(|c| (c[0], c[1]))
-            .collect();
+        // Exact by construction: the length check above requires
+        // `p.len() == 3 + nc + nl * 2`, so this slice is exactly `nl` pairs.
+        let (layout_pairs, remainder) = p[3 + nc..].as_chunks::<2>();
+        debug_assert!(remainder.is_empty());
+        let layouts = layout_pairs.iter().map(|c| (c[0], c[1])).collect();
         Ok(Self { max_version, ciphers, layouts })
     }
 }

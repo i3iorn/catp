@@ -1,6 +1,6 @@
 //! CATP reference sender: emits varied synthetic telemetry.
 //!
-//! Usage: catp-sender [collector_addr] [rate_hz]
+//! Usage: catp-sender \[collector_addr\] \[rate_hz\]
 //!
 //! Exercises several CATP message/framing paths against a live collector:
 //!   - MESSAGE: one observation carried twice, structured and unstructured

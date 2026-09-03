@@ -256,7 +256,7 @@ pub fn validate_number(p: &[u8]) -> Result<(), Error> {
         }
     }
     // Reject -0 and -0.000: negative zero has no canonical use here.
-    if neg && int == b"0" && frac.map_or(true, |f| f.iter().all(|&c| c == b'0')) {
+    if neg && int == b"0" && frac.is_none_or(|f| f.iter().all(|&c| c == b'0')) {
         return Err(Error::BadNumber("negative zero"));
     }
     Ok(())
@@ -374,7 +374,7 @@ pub struct ReplayWindow {
 
 impl ReplayWindow {
     pub fn new(entries: u32) -> Self {
-        assert!(entries > 0 && entries % 64 == 0, "entries must be a positive multiple of 64");
+        assert!(entries > 0 && entries.is_multiple_of(64), "entries must be a positive multiple of 64");
         Self { high: None, bits: vec![0; (entries / 64) as usize], entries }
     }
 
