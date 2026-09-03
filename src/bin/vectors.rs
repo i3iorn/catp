@@ -19,14 +19,14 @@ fn accept(name: &str, secret: &DeviceSecret, epoch: u32, dir: Direction, dg: &Da
     let key = secret.epoch_key(dg.sender_id, epoch, dir);
     println!("# {name}");
     println!("kind         accept");
-    println!("device_secret {}", hex(&secret.0));
+    println!("device_secret {}", hex(secret.expose_secret()));
     println!("sender_id    {:08x}", dg.sender_id);
     println!("epoch_id     {epoch}");
     println!("direction    {:02x}", dir as u8);
     println!("cipher_id    {:02x}", dg.cipher_id);
     println!("msg_type     {:02x}", dg.msg_type);
     println!("offset       {}", dg.datagram_offset);
-    println!("epoch_key    {}", hex(&key));
+    println!("epoch_key    {}", hex(&key[..]));
     println!("auth_header  {}", hex(&dg.auth_header(epoch)));
     println!("wire         {}", hex(&wire));
     println!("wire_len     {}", wire.len());
@@ -34,7 +34,7 @@ fn accept(name: &str, secret: &DeviceSecret, epoch: u32, dir: Direction, dg: &Da
 }
 
 fn main() {
-    let s = DeviceSecret([
+    let s = DeviceSecret::new([
         0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
         0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
         0x1e, 0x1f,
@@ -257,10 +257,10 @@ fn main() {
     let req = Datagram::time_request(id, &s).unwrap();
     println!("# TIME_REQUEST, cipher 0x01 mandatory, node-to-collector time_key");
     println!("kind         accept_time_request");
-    println!("device_secret {}", hex(&s.0));
+    println!("device_secret {}", hex(s.expose_secret()));
     println!("sender_id    {id:08x}");
     println!("direction    00");
-    println!("time_key     {}", hex(&s.time_key(id, Direction::NodeToCollector)));
+    println!("time_key     {}", hex(&s.time_key(id, Direction::NodeToCollector)[..]));
     println!("wire         {}", hex(&req));
     println!("wire_len     {}", req.len());
     println!();
@@ -269,10 +269,10 @@ fn main() {
     let wire = Datagram::time_announce(id, asserted, &s).unwrap();
     println!("# TIME_ANNOUNCE, cipher 0x01 mandatory, collector-to-node time_key");
     println!("kind         accept_time_announce");
-    println!("device_secret {}", hex(&s.0));
+    println!("device_secret {}", hex(s.expose_secret()));
     println!("sender_id    {id:08x}");
     println!("direction    01");
-    println!("time_key     {}", hex(&s.time_key(id, Direction::CollectorToNode)));
+    println!("time_key     {}", hex(&s.time_key(id, Direction::CollectorToNode)[..]));
     println!("asserted_time {asserted}");
     println!("wire         {}", hex(&wire));
     println!("wire_len     {}", wire.len());

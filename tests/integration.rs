@@ -11,7 +11,7 @@ const OTHER: u32 = 0x0000_5678;
 const SCHEMA: u8 = 1;
 
 fn secret(seed: u8) -> DeviceSecret {
-    DeviceSecret([seed; 32])
+    DeviceSecret::new([seed; 32])
 }
 
 fn cfg(id: u32, seed: u8, cipher: CipherId) -> PeerConfig {

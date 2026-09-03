@@ -68,7 +68,7 @@ fn every_accept_vector_verifies_and_reencodes() {
         if m.get("kind").map(String::as_str) != Some("accept") {
             continue;
         }
-        let secret = DeviceSecret(unhex(&m["device_secret"]).try_into().unwrap());
+        let secret = DeviceSecret::new(unhex(&m["device_secret"]).try_into().unwrap());
         let sender_id = u32::from_str_radix(&m["sender_id"], 16).unwrap();
         let epoch: u32 = m["epoch_id"].parse().unwrap();
         let dir = match unhex(&m["direction"])[0] {
@@ -129,7 +129,7 @@ fn reserved_bit_vector_is_ignored_not_rejected() {
     // Byte 2 holds reserved in its high 5 bits.
     assert_eq!(wire[2] >> 3, 0x1F, "vector should have all reserved bits set");
 
-    let secret = DeviceSecret(unhex(&m["device_secret"]).try_into().unwrap());
+    let secret = DeviceSecret::new(unhex(&m["device_secret"]).try_into().unwrap());
     let peer = PeerConfig {
         sender_id: u32::from_str_radix(&m["sender_id"], 16).unwrap(),
         secret,
@@ -150,7 +150,7 @@ fn time_announce_vector_verifies() {
         .into_iter()
         .find(|m| m.get("kind").map(String::as_str) == Some("accept_time_announce"))
         .expect("TIME_ANNOUNCE vector missing");
-    let secret = DeviceSecret(unhex(&m["device_secret"]).try_into().unwrap());
+    let secret = DeviceSecret::new(unhex(&m["device_secret"]).try_into().unwrap());
     let sender_id = u32::from_str_radix(&m["sender_id"], 16).unwrap();
     let wire = unhex(&m["wire"]);
 
@@ -174,7 +174,7 @@ fn time_request_vector_verifies_and_is_directional() {
         .into_iter()
         .find(|m| m.get("kind").map(String::as_str) == Some("accept_time_request"))
         .expect("TIME_REQUEST vector missing");
-    let secret = DeviceSecret(unhex(&m["device_secret"]).try_into().unwrap());
+    let secret = DeviceSecret::new(unhex(&m["device_secret"]).try_into().unwrap());
     let sender_id = u32::from_str_radix(&m["sender_id"], 16).unwrap();
     let wire = unhex(&m["wire"]);
 
@@ -219,7 +219,7 @@ fn every_vector_is_tamper_evident() {
         if m.get("kind").map(String::as_str) != Some("accept") {
             continue;
         }
-        let secret = DeviceSecret(unhex(&m["device_secret"]).try_into().unwrap());
+        let secret = DeviceSecret::new(unhex(&m["device_secret"]).try_into().unwrap());
         let sender_id = u32::from_str_radix(&m["sender_id"], 16).unwrap();
         let epoch: u32 = m["epoch_id"].parse().unwrap();
         let dir = match unhex(&m["direction"])[0] {

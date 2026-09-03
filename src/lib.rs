@@ -15,6 +15,7 @@ use hmac::digest::KeyInit;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 pub mod control;
 pub mod peer;
@@ -292,12 +293,41 @@ impl std::error::Error for Error {}
 // ------------------------------------------------------------------ key sched
 
 /// Per-node 32-byte secret, provisioned out of band (PROTOCOL.md 9.2).
-#[derive(Clone)]
-pub struct DeviceSecret(pub [u8; 32]);
+///
+/// The field is private, and this type deliberately implements neither
+/// `Debug` nor `Display`, so an accidental `{:?}` or log line cannot print
+/// it -- a struct that embeds one gets the same protection for free, since
+/// deriving `Debug` on it would fail to compile. Contents are zeroized on
+/// drop.
+///
+/// Zeroization in safe Rust is best-effort: an optimizer is free to leave
+/// copies elsewhere on the stack or in registers, and nothing here can see
+/// or prevent that. It is a large improvement over none, not a guarantee.
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
+pub struct DeviceSecret([u8; 32]);
 
 impl DeviceSecret {
+    pub fn new(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Exposes the raw secret bytes.
+    ///
+    /// For provisioning and conformance-vector tooling only -- `catp-vectors`
+    /// deliberately publishes plaintext secrets into `docs/test-vectors.txt`,
+    /// which is what this exists for. Ordinary code has no reason to call
+    /// it: derive a key with [`Self::epoch_key`] / [`Self::time_key`] instead
+    /// of handling the secret itself.
+    pub fn expose_secret(&self) -> &[u8; 32] {
+        &self.0
+    }
+
     /// `epoch_key = HKDF-Expand(PRK, "CATP1" || sender_id || epoch_id || direction, 32)`
-    pub fn epoch_key(&self, sender_id: u32, epoch_id: u32, dir: Direction) -> [u8; 32] {
+    ///
+    /// Returned wrapped in [`Zeroizing`] so the derived key -- as sensitive as
+    /// the secret it came from for the epoch it names -- doesn't outlive its
+    /// last use unzeroized either.
+    pub fn epoch_key(&self, sender_id: u32, epoch_id: u32, dir: Direction) -> Zeroizing<[u8; 32]> {
         let hk = Hkdf::<Sha256>::new(None, &self.0);
         let mut info = Vec::with_capacity(5 + 4 + 4 + 1);
         info.extend_from_slice(b"CATP1");
@@ -306,7 +336,7 @@ impl DeviceSecret {
         info.push(dir as u8);
         let mut okm = [0u8; 32];
         hk.expand(&info, &mut okm).expect("32 is a valid HKDF length");
-        okm
+        Zeroizing::new(okm)
     }
 
     /// Epoch-independent bootstrap key (PROTOCOL.md 11.2).
@@ -314,7 +344,7 @@ impl DeviceSecret {
     /// `direction` is a key-derivation input, so `TIME_REQUEST` (`0x00`) and
     /// `TIME_ANNOUNCE` (`0x01`) are authenticated under distinct keys. A
     /// receiver MUST NOT accept a tag generated with the opposite direction.
-    pub fn time_key(&self, sender_id: u32, direction: Direction) -> [u8; 32] {
+    pub fn time_key(&self, sender_id: u32, direction: Direction) -> Zeroizing<[u8; 32]> {
         let hk = Hkdf::<Sha256>::new(None, &self.0);
         let mut info = Vec::with_capacity(10 + 4 + 1);
         info.extend_from_slice(b"CATP1-time");
@@ -322,7 +352,7 @@ impl DeviceSecret {
         info.push(direction as u8);
         let mut okm = [0u8; 32];
         hk.expand(&info, &mut okm).expect("32 is a valid HKDF length");
-        okm
+        Zeroizing::new(okm)
     }
 }
 
@@ -715,7 +745,7 @@ mod tests {
 
     #[test]
     fn epoch_key_separates_direction_and_sender() {
-        let s = DeviceSecret([7u8; 32]);
+        let s = DeviceSecret::new([7u8; 32]);
         let a = s.epoch_key(1, 5, Direction::NodeToCollector);
         let b = s.epoch_key(1, 5, Direction::CollectorToNode);
         let c = s.epoch_key(2, 5, Direction::NodeToCollector);
@@ -729,6 +759,25 @@ mod tests {
         assert_ne!(a, tq);
         assert_ne!(a, ta);
         assert_ne!(tq, ta, "TIME_REQUEST and TIME_ANNOUNCE must not share a key");
+    }
+
+    #[test]
+    fn expose_secret_returns_exactly_what_was_provisioned() {
+        let bytes = [9u8; 32];
+        let s = DeviceSecret::new(bytes);
+        assert_eq!(*s.expose_secret(), bytes);
+    }
+
+    #[test]
+    fn derived_keys_are_zeroizing() {
+        // Type-level: epoch_key/time_key return Zeroizing<[u8; 32]>, not a bare
+        // array, so a copy that outlives its last use still gets wiped on drop.
+        // This assigns to a binding annotated with the concrete type, which
+        // would fail to compile if the return type ever regressed to a plain
+        // array.
+        let s = DeviceSecret::new([1u8; 32]);
+        let _k: zeroize::Zeroizing<[u8; 32]> = s.epoch_key(1, 1, Direction::NodeToCollector);
+        let _t: zeroize::Zeroizing<[u8; 32]> = s.time_key(1, Direction::NodeToCollector);
     }
 
     #[test]
