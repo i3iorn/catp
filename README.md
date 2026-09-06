@@ -38,7 +38,11 @@ If your telemetry content is itself sensitive, CATP is the wrong protocol. See
 
 ## Reference implementation
 
-Rust, no unsafe, three dependencies (`hmac`, `sha2`, `hkdf`).
+Rust, `unsafe_code` forbidden crate-wide, five direct dependencies (`hmac`,
+`sha2`, `hkdf`, `subtle`, `zeroize`) — RustCrypto crates plus their
+constant-time and zeroizing-memory helpers, pulling in their usual transitive
+tree (`digest`, `crypto-common`, `typenum`, and the like). MSRV 1.88, tracked
+in `Cargo.toml`'s `rust-version` and tested in CI.
 
 ```
 src/lib.rs      key schedule, epoch math, replay window, NUMBER/SERIES codec, pacer
