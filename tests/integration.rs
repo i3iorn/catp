@@ -443,6 +443,30 @@ fn both_implemented_ciphers_round_trip() {
     assert_eq!(lens[1] - lens[0], 4, "0x01 carries 4 more tag bytes than 0x04");
 }
 
+/// All four registered cipher suites round-trip end to end through
+/// `Collector`, not just the two HMAC ones, with tag length matching the
+/// registry of PROTOCOL.md 8.1.
+#[test]
+fn every_registered_cipher_round_trips_through_the_collector() {
+    let epoch = epoch_id_at(1_700_000_000);
+    for c in [
+        CipherId::HmacSha256T64,
+        CipherId::SipHash24,
+        CipherId::ChaCha20Poly1305,
+        CipherId::HmacSha256T32,
+    ] {
+        let mut col = Collector::new();
+        col.provision(cfg(NODE, 1, c)).unwrap();
+        let w = Datagram::number(c, NODE, epoch, 21, 1, 35)
+            .unwrap()
+            .encode(&secret(1), epoch, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
+            .unwrap();
+        assert_eq!(w.len(), 9 + NUMBER_PAYLOAD_LEN + c.tag_len(), "cipher {:?}", c as u8);
+        let acc = col.accept(&w, epoch, Direction::NodeToCollector, 0).unwrap();
+        assert_eq!(acc.datagram.number_value(), Some((1, 35)));
+    }
+}
+
 /// A record in a reserved format is skipped individually, not fatally
 /// (PROTOCOL.md 6.4.3).
 #[test]

@@ -49,7 +49,12 @@ fn main() {
     println!();
 
     // --- one accepted datagram per msg_type, per implemented cipher ---
-    for cipher in [CipherId::HmacSha256T64, CipherId::HmacSha256T32, CipherId::SipHash24] {
+    for cipher in [
+        CipherId::HmacSha256T64,
+        CipherId::HmacSha256T32,
+        CipherId::SipHash24,
+        CipherId::ChaCha20Poly1305,
+    ] {
         let tag = cipher.tag_len();
         accept(
             &format!("NUMBER, positive, scale 0x02, tag{tag}"),
@@ -280,6 +285,24 @@ fn main() {
             d.reserved = 0x1F;
             d
         },
+    );
+
+    // --- cipher 0x03: two datagrams differing only in datagram_offset,
+    // confirming distinct nonces produce distinct tags under one epoch_key
+    // (PROTOCOL.md 14.1, 14.2; RATIONALE.md R5) ---
+    accept(
+        "cipher 0x03: nonce pair, offset 10",
+        &s,
+        epoch,
+        n2c,
+        &Datagram::number(CipherId::ChaCha20Poly1305, id, epoch, 10, SCALE_MIN, 10).unwrap(),
+    );
+    accept(
+        "cipher 0x03: nonce pair, offset 11 (same epoch_key, distinct nonce)",
+        &s,
+        epoch,
+        n2c,
+        &Datagram::number(CipherId::ChaCha20Poly1305, id, epoch, 11, SCALE_MIN, 10).unwrap(),
     );
 
     // --- time recovery: its own key schedule, one key per direction ---

@@ -4,14 +4,14 @@
 //! 3-byte record framing, the fixed-point `NUMBER`/`SERIES` codec, HKDF epoch
 //! keys, and offset-keyed replay protection.
 //!
-//! Cipher suites `0x01` (HMAC-SHA256-t64), `0x02` (SipHash-2-4), and `0x04`
-//! (HMAC-SHA256-t32) are implemented. `0x03` (ChaCha20-Poly1305) is
-//! registered in [`CipherId`] but returns [`Error::CipherUnimplemented`], so
-//! the framing and key-schedule paths stay honest about what has actually
-//! been exercised.
+//! Cipher suites `0x01` (HMAC-SHA256-t64), `0x02` (SipHash-2-4), `0x03`
+//! (ChaCha20-Poly1305, AAD-only), and `0x04` (HMAC-SHA256-t32) are all
+//! implemented -- see [`mac`].
 
 #![forbid(unsafe_code)]
 
+use chacha20poly1305::aead::AeadInOut;
+use chacha20poly1305::{ChaCha20Poly1305, KeyInit as AeadKeyInit};
 use hkdf::Hkdf;
 // `KeyInit` supplies `new_from_slice`; it moved off `Mac` in digest 0.11.
 use hmac::digest::KeyInit;
@@ -116,7 +116,10 @@ impl CipherId {
     }
     /// True for suites this reference implementation can actually compute.
     pub fn implemented(self) -> bool {
-        matches!(self, Self::HmacSha256T64 | Self::HmacSha256T32 | Self::SipHash24)
+        matches!(
+            self,
+            Self::HmacSha256T64 | Self::HmacSha256T32 | Self::SipHash24 | Self::ChaCha20Poly1305
+        )
     }
 
     /// Whether a receiver accepting this suite MUST enforce a per-`sender_id`
@@ -404,7 +407,11 @@ impl DeviceSecret {
 }
 
 /// Compute a tag of `tag_len` bytes over `msg` under `key`.
-pub fn mac(cipher: CipherId, key: &[u8; 32], msg: &[u8]) -> Result<Vec<u8>, Error> {
+/// `datagram_offset` is only consulted by `cipher_id` `0x03`, which derives
+/// its nonce from it (PROTOCOL.md 7.2); every other suite ignores it. Callers
+/// with no real offset (e.g. `TIME_ANNOUNCE`/`TIME_REQUEST`, pinned to `0x01`)
+/// may pass `0`.
+pub fn mac(cipher: CipherId, key: &[u8; 32], msg: &[u8], datagram_offset: u32) -> Result<Vec<u8>, Error> {
     if !cipher.implemented() {
         return Err(Error::CipherUnimplemented(cipher as u8));
     }
@@ -425,7 +432,27 @@ pub fn mac(cipher: CipherId, key: &[u8; 32], msg: &[u8]) -> Result<Vec<u8>, Erro
             let tag = SipHasher24::new_with_key(&sip_key).hash(msg);
             Ok(tag.to_be_bytes().to_vec())
         }
-        CipherId::ChaCha20Poly1305 => unreachable!("excluded by cipher.implemented() above"),
+        // PROTOCOL.md 7.2, AAD-only RFC 8439: plaintext is empty, msg is
+        // carried entirely as associated data, and only the 16-byte Poly1305
+        // tag is transmitted. RATIONALE.md R5: (key, nonce) uniqueness is
+        // what keeps Poly1305 from being a total break, and datagram_offset's
+        // per-epoch uniqueness (Section 10.1) is what makes the nonce unique.
+        //
+        // Nonce layout resolves a specification ambiguity (issue #63): 8
+        // zero bytes followed by datagram_offset zero-extended to a 4-byte
+        // big-endian u32, rather than reusing its native 3-byte header
+        // width -- see that issue for the reasoning and for what would need
+        // to change here if the specification is corrected differently.
+        CipherId::ChaCha20Poly1305 => {
+            let cipher = ChaCha20Poly1305::new(key.into());
+            let mut nonce_bytes = [0u8; 12];
+            nonce_bytes[8..].copy_from_slice(&datagram_offset.to_be_bytes());
+            let empty: &mut [u8] = &mut []; // empty plaintext: AAD-only construction
+            let tag = cipher
+                .encrypt_inout_detached((&nonce_bytes).into(), msg, empty.into())
+                .expect("empty plaintext never overflows the AEAD size limit");
+            Ok(tag.to_vec())
+        }
     }
 }
 
@@ -757,15 +784,12 @@ mod tests {
     }
 
     #[test]
-    fn unimplemented_ciphers_error_rather_than_lie() {
+    fn all_four_registered_ciphers_are_implemented() {
         let k = [0u8; 32];
-        assert!(mac(CipherId::HmacSha256T64, &k, b"x").is_ok());
-        assert!(mac(CipherId::HmacSha256T32, &k, b"x").is_ok());
-        assert!(mac(CipherId::SipHash24, &k, b"x").is_ok());
-        assert_eq!(
-            mac(CipherId::ChaCha20Poly1305, &k, b"x"),
-            Err(Error::CipherUnimplemented(0x03))
-        );
+        assert!(mac(CipherId::HmacSha256T64, &k, b"x", 0).is_ok());
+        assert!(mac(CipherId::HmacSha256T32, &k, b"x", 0).is_ok());
+        assert!(mac(CipherId::SipHash24, &k, b"x", 0).is_ok());
+        assert!(mac(CipherId::ChaCha20Poly1305, &k, b"x", 0).is_ok());
     }
 
     /// PROTOCOL.md 7.2: SipHash-2-4 uses only the first 16 bytes of
@@ -776,11 +800,17 @@ mod tests {
         let mut k2 = k1;
         k2[16] ^= 0xFF; // flip a bit in the unused half
         assert_ne!(k1, k2);
-        assert_eq!(mac(CipherId::SipHash24, &k1, b"x").unwrap(), mac(CipherId::SipHash24, &k2, b"x").unwrap());
+        assert_eq!(
+            mac(CipherId::SipHash24, &k1, b"x", 0).unwrap(),
+            mac(CipherId::SipHash24, &k2, b"x", 0).unwrap()
+        );
 
         // But the first half is load-bearing: flipping it changes the tag.
         k1[0] ^= 0xFF;
-        assert_ne!(mac(CipherId::SipHash24, &k1, b"x").unwrap(), mac(CipherId::SipHash24, &k2, b"x").unwrap());
+        assert_ne!(
+            mac(CipherId::SipHash24, &k1, b"x", 0).unwrap(),
+            mac(CipherId::SipHash24, &k2, b"x", 0).unwrap()
+        );
     }
 
     /// SipHash-2-4's output is 8 bytes with no truncation needed, unlike
@@ -788,7 +818,20 @@ mod tests {
     #[test]
     fn siphash_tag_is_eight_bytes_untruncated() {
         let k = [0x22u8; 32];
-        assert_eq!(mac(CipherId::SipHash24, &k, b"hello").unwrap().len(), 8);
+        assert_eq!(mac(CipherId::SipHash24, &k, b"hello", 0).unwrap().len(), 8);
+    }
+
+    /// PROTOCOL.md 7.2: cipher 0x03's nonce is derived from datagram_offset.
+    /// Two datagrams differing only in offset must not share a tag under the
+    /// same key -- RATIONALE.md R5's whole point is that a repeated nonce is
+    /// a total break, so this is the property that matters most to test.
+    #[test]
+    fn chacha20poly1305_tag_depends_on_datagram_offset() {
+        let k = [7u8; 32];
+        let a = mac(CipherId::ChaCha20Poly1305, &k, b"same message", 1).unwrap();
+        let b = mac(CipherId::ChaCha20Poly1305, &k, b"same message", 2).unwrap();
+        assert_ne!(a, b, "distinct offsets must not produce the same tag");
+        assert_eq!(a.len(), 16);
     }
 
     #[test]
@@ -799,8 +842,8 @@ mod tests {
         assert_eq!(CipherId::HmacSha256T32.tag_len(), 4);
         // t32 is a prefix of t64: same construction, different truncation.
         let k = [9u8; 32];
-        let a = mac(CipherId::HmacSha256T64, &k, b"abc").unwrap();
-        let b = mac(CipherId::HmacSha256T32, &k, b"abc").unwrap();
+        let a = mac(CipherId::HmacSha256T64, &k, b"abc", 0).unwrap();
+        let b = mac(CipherId::HmacSha256T32, &k, b"abc", 0).unwrap();
         assert_eq!(&a[..4], &b[..]);
     }
 

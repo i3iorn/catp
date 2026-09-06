@@ -464,6 +464,160 @@ auth_header  34200002bc00caa7e212345678
 wire         34220002bc12345678010201040201010202d737b7079461c679
 wire_len     26
 
+# NUMBER, positive, scale 0x02, tag16
+kind         accept
+device_secret 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+sender_id    12345678
+epoch_id     13281250
+direction    00
+cipher_id    03
+msg_type     04
+offset       4096
+epoch_key    cf2819883ae2e26ddf4d7e0766fd91c3b11184a00775a3e01c923cf3768e8581
+auth_header  243000100000caa7e212345678
+wire         24320010001234567802092e0a81554dc1ef19aa15832372b1bece41
+wire_len     28
+
+# NUMBER, negative, scale 0x02, tag16
+kind         accept
+device_secret 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+sender_id    12345678
+epoch_id     13281250
+direction    00
+cipher_id    03
+msg_type     04
+offset       4097
+epoch_key    cf2819883ae2e26ddf4d7e0766fd91c3b11184a00775a3e01c923cf3768e8581
+auth_header  243000100100caa7e212345678
+wire         24320010011234567802ffe735432fc0741828ecbf4672e889f0ba1b
+wire_len     28
+
+# NUMBER, zero, scale 0x01, tag16
+kind         accept
+device_secret 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+sender_id    12345678
+epoch_id     13281250
+direction    00
+cipher_id    03
+msg_type     04
+offset       0
+epoch_key    cf2819883ae2e26ddf4d7e0766fd91c3b11184a00775a3e01c923cf3768e8581
+auth_header  243000000000caa7e212345678
+wire         2432000000123456780100006e9e70c4b683cb76745c0dc03f89d478
+wire_len     28
+
+# SERIES, three readings, tag16
+kind         accept
+device_secret 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+sender_id    12345678
+epoch_id     13281250
+direction    00
+cipher_id    03
+msg_type     05
+offset       4200
+epoch_key    cf2819883ae2e26ddf4d7e0766fd91c3b11184a00775a3e01c923cf3768e8581
+auth_header  253000106800caa7e212345678
+wire         25320010681234567802092e00fa093801c2093326ec810c53f8065485ec38ab07937dea
+wire_len     36
+
+# MESSAGE, single record, tag16
+kind         accept
+device_secret 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+sender_id    12345678
+epoch_id     13281250
+direction    00
+cipher_id    03
+msg_type     01
+offset       100
+epoch_key    cf2819883ae2e26ddf4d7e0766fd91c3b11184a00775a3e01c923cf3768e8581
+auth_header  213000006400caa7e212345678
+wire         213200006412345678101002deadb1e57a4e769dcf92160d58facbbcc819
+wire_len     30
+
+# MESSAGE, three records, mixed formats, tag16
+kind         accept
+device_secret 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+sender_id    12345678
+epoch_id     13281250
+direction    00
+cipher_id    03
+msg_type     01
+offset       200
+epoch_key    cf2819883ae2e26ddf4d7e0766fd91c3b11184a00775a3e01c923cf3768e8581
+auth_header  21300000c800caa7e212345678
+wire         21320000c8123456781010010120200202033ff0030405068815dafbd0ad366c6b15de5c03950488
+wire_len     40
+
+# EVENT, one record, tag16
+kind         accept
+device_secret 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+sender_id    12345678
+epoch_id     13281250
+direction    00
+cipher_id    03
+msg_type     02
+offset       300
+epoch_key    cf2819883ae2e26ddf4d7e0766fd91c3b11184a00775a3e01c923cf3768e8581
+auth_header  223000012c00caa7e212345678
+wire         223200012c12345678107001aa211b116737f20a39021cbb3de26a0225
+wire_len     29
+
+# ALARM, one record, tag16
+kind         accept
+device_secret 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+sender_id    12345678
+epoch_id     13281250
+direction    00
+cipher_id    03
+msg_type     03
+offset       400
+epoch_key    cf2819883ae2e26ddf4d7e0766fd91c3b11184a00775a3e01c923cf3768e8581
+auth_header  233000019000caa7e212345678
+wire         233200019012345678109002bbcc3831a1c08e44194fcdc6b03a7a6251d2
+wire_len     30
+
+# HEARTBEAT, empty payload, tag16
+kind         accept
+device_secret 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+sender_id    12345678
+epoch_id     13281250
+direction    00
+cipher_id    03
+msg_type     13
+offset       500
+epoch_key    cf2819883ae2e26ddf4d7e0766fd91c3b11184a00775a3e01c923cf3768e8581
+auth_header  33300001f400caa7e212345678
+wire         33320001f4123456782ebcd55ff6dcecbbe2c20a7e536cdf8f
+wire_len     25
+
+# EPOCH_ANNOUNCE, collector to node, tag16
+kind         accept
+device_secret 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+sender_id    12345678
+epoch_id     13281250
+direction    01
+cipher_id    03
+msg_type     10
+offset       600
+epoch_key    58e66d07a25f38ae5ed2f8ded867b2489076fef49dab577a0653af44ffb0c63d
+auth_header  303000025800caa7e212345678
+wire         30320002581234567800caa7e3044cb6612eb7e163650d6d6c83bc98d3
+wire_len     29
+
+# CAPABILITY_ADVERTISE, tag16
+kind         accept
+device_secret 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+sender_id    12345678
+epoch_id     13281250
+direction    00
+cipher_id    03
+msg_type     14
+offset       700
+epoch_key    cf2819883ae2e26ddf4d7e0766fd91c3b11184a00775a3e01c923cf3768e8581
+auth_header  34300002bc00caa7e212345678
+wire         34320002bc1234567801020104020101020239d6d57385f19aea3f242a47d275515e
+wire_len     34
+
 # boundary: offset 0
 kind         accept
 device_secret 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
@@ -603,6 +757,34 @@ epoch_key    cf2819883ae2e26ddf4d7e0766fd91c3b11184a00775a3e01c923cf3768e8581
 auth_header  2440f8000800caa7e212345678
 wire         2442f800081234567801000a13f04914
 wire_len     16
+
+# cipher 0x03: nonce pair, offset 10
+kind         accept
+device_secret 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+sender_id    12345678
+epoch_id     13281250
+direction    00
+cipher_id    03
+msg_type     04
+offset       10
+epoch_key    cf2819883ae2e26ddf4d7e0766fd91c3b11184a00775a3e01c923cf3768e8581
+auth_header  243000000a00caa7e212345678
+wire         243200000a1234567801000a8d52b202788eeed580ac9b5cb3c56e0e
+wire_len     28
+
+# cipher 0x03: nonce pair, offset 11 (same epoch_key, distinct nonce)
+kind         accept
+device_secret 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+sender_id    12345678
+epoch_id     13281250
+direction    00
+cipher_id    03
+msg_type     04
+offset       11
+epoch_key    cf2819883ae2e26ddf4d7e0766fd91c3b11184a00775a3e01c923cf3768e8581
+auth_header  243000000b00caa7e212345678
+wire         243200000b1234567801000ad3a4a374aa05d143cb9251a5c6504338
+wire_len     28
 
 # TIME_REQUEST, cipher 0x01 mandatory, node-to-collector time_key
 kind         accept_time_request
