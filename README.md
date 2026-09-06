@@ -42,11 +42,12 @@ If your telemetry content is itself sensitive, CATP is the wrong protocol. See
 
 ## Reference implementation
 
-Rust, `unsafe_code` forbidden crate-wide, five direct dependencies (`hmac`,
-`sha2`, `hkdf`, `subtle`, `zeroize`) — RustCrypto crates plus their
-constant-time and zeroizing-memory helpers, pulling in their usual transitive
-tree (`digest`, `crypto-common`, `typenum`, and the like). MSRV 1.88, tracked
-in `Cargo.toml`'s `rust-version` and tested in CI.
+Rust, `unsafe_code` forbidden crate-wide, six direct dependencies (`hmac`,
+`sha2`, `hkdf`, `subtle`, `zeroize`, `siphasher`) — RustCrypto crates plus
+their constant-time and zeroizing-memory helpers, plus `siphasher` for
+cipher `0x02`, pulling in their usual transitive tree (`digest`,
+`crypto-common`, `typenum`, and the like). MSRV 1.88, tracked in
+`Cargo.toml`'s `rust-version` and tested in CI.
 
 ```
 src/lib.rs      key schedule, epoch math, replay window, NUMBER/SERIES codec, pacer
@@ -55,9 +56,10 @@ src/control.rs  EPOCH_ANNOUNCE, TIME_ANNOUNCE, TIME_REQUEST, HEARTBEAT, CAPABILI
 src/peer.rs     per-epoch replay windows, multi-peer collector, cold-start clock
 ```
 
-Cipher suites `0x01` (HMAC-SHA256, 8-byte tag) and `0x04` (4-byte tag) are
-implemented. `0x02` (SipHash) and `0x03` (ChaCha20-Poly1305) are registered in
-the type but return `CipherUnimplemented` rather than pretending.
+Cipher suites `0x01` (HMAC-SHA256, 8-byte tag), `0x02` (SipHash-2-4, 8-byte
+tag), and `0x04` (HMAC-SHA256, 4-byte tag) are implemented. `0x03`
+(ChaCha20-Poly1305) is registered in the type but returns
+`CipherUnimplemented` rather than pretending.
 
 ### Running it
 

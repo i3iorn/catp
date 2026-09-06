@@ -49,7 +49,7 @@ fn main() {
     println!();
 
     // --- one accepted datagram per msg_type, per implemented cipher ---
-    for cipher in [CipherId::HmacSha256T64, CipherId::HmacSha256T32] {
+    for cipher in [CipherId::HmacSha256T64, CipherId::HmacSha256T32, CipherId::SipHash24] {
         let tag = cipher.tag_len();
         accept(
             &format!("NUMBER, positive, scale 0x02, tag{tag}"),
