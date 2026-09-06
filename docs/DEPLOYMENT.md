@@ -57,6 +57,80 @@ Size this against measured reordering on your own paths. The cost of a window
 too small is silently discarded legitimate traffic; the cost of one too large is
 memory multiplied by your fleet size.
 
+### Fleet-size memory (issue #40)
+
+§9.3 keeps two epoch windows live per peer (current and previous), so the
+bitmap cost above is paid twice per `sender_id` at steady state. That's the
+whole of it only in theory, though — a `Collector` entry also carries a
+`HashMap` bucket, the peer's `PeerConfig` (including its layout list and
+secret), and its `Stats` counters (#36), all of which cost real bytes this
+document had never measured.
+
+Measured with `cargo run --release --example mem_probe`
+(`examples/mem_probe.rs`), which provisions N peers and forces two live
+epoch windows each, then reads the process's actual RSS delta from
+`/proc/self/status` — a real number, not just the bitmap arithmetic:
+
+| Peers | Window (default, 1 s/4096 entries) | Measured, incl. overhead | Window (RECOMMENDED, 4 s/16384 entries)\* |
+|---|---|---|---|
+| 100 | 100 KiB | 228 KiB (2.3 KB/peer) | ~475 KiB |
+| 1,000 | 1 MiB | 1.8 MiB (1.9 KB/peer) | ~4.6 MiB |
+| 10,000 | 10 MiB | 17 MiB (1.8 KB/peer) | ~46 MiB |
+
+\*Extrapolated, not measured directly: `Collector` does not currently expose
+per-peer window sizing (only `PeerState::with_window` does, one layer down),
+so the RECOMMENDED-window column is: measured fixed overhead per peer
+(~762 bytes, back-solved as measured-minus-two-default-bitmaps at the
+10,000-peer point) plus two RECOMMENDED-size (2 KiB) bitmaps. Confirms the
+issue's own back-of-envelope figure: "~40 MB of replay bitmap alone" for a
+10,000-node fleet at the RECOMMENDED window size is right, plus roughly
+another 15% for everything else `Collector` holds per peer.
+
+Measured on a 4-core Intel Xeon @ 2.80GHz (a CI-class VM, not the constrained
+target class this protocol is designed for — see #37/#43, below). Numbers
+here are for capacity planning on the *host* side (the collector), which is
+where a fleet-scale memory budget actually matters; a constrained *sender*
+holds state for one peer, itself, not a fleet.
+
+### Receiver throughput and the DoS cost bound (issue #40)
+
+§12.5's bound — "cost is bounded at one MAC computation per datagram
+regardless of fleet size" — is structurally true but says nothing about the
+absolute number, which is what actually tells an operator how much junk
+traffic a collector survives. `cargo bench` (`benches/codec.rs`) measures it,
+on the same host as the memory table above:
+
+| Operation | Time | Implied single-core rate |
+|---|---|---|
+| `decode`, reject at step 1 (too short) | ~63 ns | ~15.9M/s |
+| `decode`, reject at step 7 (auth failure — the expensive path) | ~4.1 µs | ~244K/s |
+| `decode`, full accept (`NUMBER`) | ~4.2 µs | ~238K/s |
+| `encode` (`NUMBER`) | ~4.1 µs | ~244K/s |
+| `epoch_key` derivation (HKDF-Expand) alone | ~2.6 µs | -- |
+
+Two things worth reading off this table:
+
+1. **Steps 1-6 really are cheap relative to the MAC**, by roughly 65x (63 ns
+   vs 4.1 µs) on this hardware — the pre-MAC filtering §7.4 mandates is doing
+   real work, not just adding a branch.
+2. **`epoch_key` derivation is ~63% of a `decode`'s total cost** (2.6 µs of
+   4.1-4.2 µs). `decode` runs it fresh per datagram; caching it per
+   `(sender_id, epoch_id, direction)` tuple — trivial since it changes at
+   most once per epoch per peer — is the obvious optimization the issue
+   asked whether anyone needed. Nobody has implemented it, so it remains
+   optimization headroom rather than a measured requirement; a receiver
+   pushing close to the ~244K/s ceiling above is where it would start to
+   matter.
+
+At ~244K/s worst-case single-core rejection rate, the §10.3 pacing ceiling
+of 4096 datagrams/second per sender is nowhere near this hardware's limit —
+but this is a CI-class x86 core, not the constrained sender class §3.1
+targets, and no equivalent number exists yet for that class (blocked on
+#37's `no_std` split or #43's C implementation actually running on target
+hardware). Treat the *relative* costs above (which step is expensive, what
+dominates `decode`) as portable; treat the absolute rates as this-machine
+numbers only.
+
 ---
 
 ## D3. Choosing a format

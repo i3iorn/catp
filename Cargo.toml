@@ -42,3 +42,10 @@ path = "src/bin/collector.rs"
 [[bin]]
 name = "catp-vectors"
 path = "src/bin/vectors.rs"
+
+[dev-dependencies]
+criterion = "0.8.2"
+
+[[bench]]
+name = "codec"
+harness = false
