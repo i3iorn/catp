@@ -36,6 +36,15 @@ Migrating between suites is a provisioning operation, not a negotiation, and
 there is a window during which datagrams are rejected. §8.3 gives the ordering
 and the option that closes the gap.
 
+`0x02` (SipHash-2-4, implemented as of issue #33) is the right choice for a
+sender where SHA-256 is disproportionately expensive relative to its other
+work (§8.1.1) and an 8-byte tag is acceptable — it costs the same wire bytes
+as `0x01`, trading the specific primitive rather than the tag length. It is
+not a general substitute for `0x01`: SipHash-2-4 is a fast keyed PRF designed
+for hash-flooding resistance, not a general-purpose cryptographic MAC with
+`0x01`'s review history, so absent a concrete reason to prefer it, `0x01`
+remains the RECOMMENDED default per §8.1.1.
+
 ---
 
 ## D2. Sizing the replay window

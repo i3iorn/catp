@@ -8,14 +8,21 @@ acceptance.
 ## Direct dependencies today
 
 ```
-hmac    0.13
-sha2    0.11
-hkdf    0.13
-subtle  2
-zeroize 1 (+derive)
+hmac      0.13
+sha2      0.11
+hkdf      0.13
+subtle    2
+zeroize   1 (+derive)
+siphasher 1
 ```
 
-`subtle` and `zeroize` are 1.x; `hmac`, `sha2`, and `hkdf` are pre-1.0.
+`subtle`, `zeroize`, and `siphasher` are 1.x; `hmac`, `sha2`, and `hkdf` are
+pre-1.0.
+
+`siphasher` (cipher `0x02`, PROTOCOL.md §7.2/§8.1, issue #33) is a single
+pure-Rust implementation with no further transitive dependencies of its own —
+the smallest possible addition for what it does, and there is no realistic
+alternative crate for SipHash-2-4 in Rust worth comparing it against.
 
 ## Pre-1.0 RustCrypto is accepted, deliberately
 

@@ -665,6 +665,75 @@ mod tests {
         assert_eq!(back, r);
     }
 
+    /// PROTOCOL.md 14.2: "One accepted record per assigned `format` value,
+    /// each with a non-zero `schema_version`." `CapnProto` and `None` are
+    /// already exercised elsewhere in this module; this closes the rest.
+    #[test]
+    fn every_assigned_format_round_trips() {
+        for fmt in [
+            Format::None,
+            Format::Cbor,
+            Format::MsgPack,
+            Format::Protobuf,
+            Format::FlatBuffers,
+            Format::CapnProto,
+        ] {
+            let r = Record::new(fmt, 7, vec![0xAB; 5]);
+            let mut buf = Vec::new();
+            r.encode_into(&mut buf).unwrap();
+            let (back, used) = Record::decode(&buf).unwrap();
+            assert_eq!(used, buf.len());
+            assert_eq!(back, r, "format {:?} did not round-trip", fmt as u8);
+        }
+    }
+
+    /// PROTOCOL.md 14.2: rejections for `format` `0x00` and `schema_version`
+    /// `0x00`. Neither is reachable through `Record::new` (it takes the
+    /// `Format` enum, which has no zero variant), so this constructs the
+    /// header word directly -- exactly the bytes an attacker or a defective
+    /// sender could put on the wire.
+    #[test]
+    fn format_and_schema_version_zero_are_rejected() {
+        // format = 0x0, schema_version = 0x01, size = 1.
+        let format_zero = [0x00u8, 0x10, 0x01, 0xAB];
+        assert_eq!(
+            Record::decode(&format_zero).unwrap_err(),
+            Error::Framing("format 0x00 is invalid")
+        );
+        // format = 0x1 (None), schema_version = 0x00, size = 1.
+        let schema_zero = [0x10u8, 0x00, 0x01, 0xAB];
+        assert_eq!(
+            Record::decode(&schema_zero).unwrap_err(),
+            Error::Framing("schema_version 0x00 is invalid")
+        );
+    }
+
+    /// PROTOCOL.md 14.2: "A record whose `schema_version` is swapped for
+    /// another of identical body width, confirming rejection rather than
+    /// misdecoding." A receiver holding only `(None, 1)` must not read a
+    /// same-width `(None, 2)` body as if it were a `(None, 1)` one -- it
+    /// must be skipped instead (PROTOCOL.md 6.4.4).
+    #[test]
+    fn schema_version_swap_at_identical_width_is_skipped_not_misdecoded() {
+        let p = peer(); // layouts: only (Format::None, 1)
+        let held = Record::new(Format::None, 1, vec![0x11; 8]);
+        let same_width_unheld = Record::new(Format::None, 2, vec![0x22; 8]);
+        let dg = Datagram::data(
+            MsgType::Message,
+            CipherId::HmacSha256T32,
+            p.sender_id,
+            EPOCH,
+            5,
+            vec![held.clone(), same_width_unheld.clone()],
+        )
+        .unwrap();
+        let wire = dg.encode(&p.secret, EPOCH, Direction::NodeToCollector, MAX_DATAGRAM_IPV4).unwrap();
+        let mut w = ReplayWindow::one_second();
+        let acc = decode(&wire, &p, EPOCH, Direction::NodeToCollector, &mut w).unwrap();
+        assert_eq!(acc.datagram.records, vec![held]);
+        assert_eq!(acc.skipped, vec![same_width_unheld]);
+    }
+
     #[test]
     fn size_and_schema_version_straddle_bytes() {
         // 300 does not fit in one byte, and schema_version's low nibble shares
