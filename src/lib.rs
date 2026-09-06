@@ -22,7 +22,7 @@ pub mod peer;
 pub mod wire;
 
 pub use control::{Capability, Control};
-pub use peer::{Collector, NodeClock, PeerState};
+pub use peer::{Collector, NodeClock, PeerState, Stats};
 pub use wire::{Datagram, Record};
 
 /// Protocol version carried in the high 3 bits of header byte 0.
