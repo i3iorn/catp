@@ -116,6 +116,13 @@ Deliberate act, not a build step:
 cargo run --bin catp-vectors > docs/test-vectors.txt
 ```
 
+### Fuzzing
+
+[`fuzz/`](fuzz/README.md) targets `decode` -- the entire pre-authentication
+remote attack surface. CI runs both targets for a bounded 60 seconds per
+push as a regression gate; see `fuzz/README.md` for running a real campaign
+locally.
+
 ## Contributing
 
 The most useful contribution is a **second implementation in another language**,

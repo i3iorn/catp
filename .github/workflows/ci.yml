@@ -93,3 +93,25 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo +nightly -Z minimal-versions generate-lockfile
       - run: cargo +stable build --all-targets
+
+  # A short bounded run per fuzz target, not a real fuzzing campaign (issue
+  # #30) -- this is a regression gate ("did this PR break the harness or
+  # reintroduce a known crash"), not how new crashes get found. Longer runs
+  # belong out of band, driven by a human or a schedule, against the full
+  # mutated corpus this job intentionally does not keep.
+  fuzz-smoke:
+    name: fuzz smoke test (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [decode, decode-roundtrip]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz -> target
+      - run: cargo install cargo-fuzz --locked
+      - run: mkdir -p fuzz/corpus/${{ matrix.target }} && cp fuzz/seeds/${{ matrix.target }}/* fuzz/corpus/${{ matrix.target }}/
+      - run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=60
