@@ -1856,11 +1856,54 @@ clock at all, and Section 11.6 bounds what an attacker gains from that path.
 
 ## 13. IANA considerations
 
-This document defines no IANA registries. The cipher suite table of Section 8.1
-is maintained by this specification, as is the `format` registry of Section
-6.4.1; `schema_version` values are assigned by the deploying organization.
+This document defines no IANA registries and requests no IANA action. The
+`msg_type`, `cipher_id`, `format`, and `version` code-point spaces it defines
+are repository-governed instead, per Section 13.2 — deliberately, not by
+default omission.
 
-Deployments select UDP ports locally. No well-known port is requested.
+### 13.1 Port
+
+Deployments select UDP ports locally. No well-known port is requested. Local
+selection is a permanent answer, not a placeholder: CATP has no in-band
+negotiation for a peer to discover, so a fixed well-known port would buy
+nothing a deployment's own configuration doesn't already provide, while an
+IANA request implies a stable specification status Section 14.3 says version 1
+does not have yet.
+
+A Wireshark dissector registration is a separate, lower-cost question from a
+port assignment, and is not addressed here; a deployment or implementer wanting
+one can pursue it independently of anything in this section.
+
+### 13.2 Registry governance
+
+Four code-point spaces are defined by this specification and owned by this
+repository, not by an external registry:
+
+| Registry | Where | Width | Assigned |
+|---|---|---|---|
+| `msg_type` | Section 6.1, 6.2 | 5 bits | 10 of 32 |
+| `cipher_id` | Section 8.1 | 4 bits | 4 of 16 |
+| `format` | Section 6.4.2 | 4 bits | 6 of 16 |
+| `version` | Section 4.1, 5 | 3 bits | 1 of 8 |
+
+Section 8.2's append-only rule for `cipher_id` — a published
+`(cipher_id, algorithm, tag length)` binding MUST NOT be modified or reused —
+is exactly the guarantee a registry exists to provide. Until this specification
+has independently written, interoperating implementations (Section 14.3),
+maintaining that guarantee is this repository's responsibility:
+
+- New code points in any of the four spaces above are assigned by a pull
+  request against this document. A request MUST NOT reuse a code point this
+  document has ever assigned, even one whose original assignment is later
+  removed.
+- The vendor ranges (`msg_type` `0x08`-`0x0F`, `format`'s reserved
+  `0x07`-`0x0F`) exist precisely so a deployment can experiment without
+  requesting an assignment here at all. Prefer them for anything
+  deployment-specific rather than opening a PR.
+- If CATP is ever implemented outside this repository, or reaches the
+  interoperating-implementations bar of Section 14.3, this section's answer is
+  expected to be revisited — repository governance is adequate for one
+  implementation and a draft specification, not indefinitely.
 
 ---
 

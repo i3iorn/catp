@@ -2,9 +2,27 @@
 name = "catp"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
 license = "Apache-2.0"
 description = "Compact Authenticated Telemetry Protocol: authenticated, connectionless telemetry over UDP"
 repository = "https://github.com/i3iorn/catp"
+readme = "README.md"
+keywords = ["telemetry", "iot", "udp", "protocol", "hmac"]
+categories = ["network-programming", "embedded"]
+# 0.1.0 tracks the crate's own API, not the wire protocol's version (still v1
+# draft per PROTOCOL.md 14.3 -- see #38). The two are not the same axis: a
+# wire-format change is a protocol-version event, a Rust API change is a
+# crate-version event, and they will not always coincide.
+#
+# Not yet published to crates.io: publishing claims the name and makes the API
+# a commitment, and that is a decision for the maintainer to make deliberately
+# rather than as a side effect of adding this metadata (see #38).
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
 
 [dependencies]
 hmac = "0.13"

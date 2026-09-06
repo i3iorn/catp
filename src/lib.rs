@@ -1,13 +1,15 @@
 //! CATP v1 reference implementation.
 //!
 //! Covers the core protocol of `docs/PROTOCOL.md`: the 9-byte datagram header,
-//! 3-byte record framing, the bare `NUMBER` literal, HKDF epoch keys, and
-//! offset-keyed replay protection.
+//! 3-byte record framing, the fixed-point `NUMBER`/`SERIES` codec, HKDF epoch
+//! keys, and offset-keyed replay protection.
 //!
 //! Cipher suites `0x01` (HMAC-SHA256-t64) and `0x04` (HMAC-SHA256-t32) are
 //! implemented. `0x02` (SipHash) and `0x03` (ChaCha20-Poly1305) are registered
 //! in [`CipherId`] but return [`Error::CipherUnimplemented`], so the framing and
 //! key-schedule paths stay honest about what has actually been exercised.
+
+#![forbid(unsafe_code)]
 
 use hkdf::Hkdf;
 // `KeyInit` supplies `new_from_slice`; it moved off `Mac` in digest 0.11.
