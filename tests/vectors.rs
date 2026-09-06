@@ -16,6 +16,96 @@ fn unhex(s: &str) -> Vec<u8> {
     (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
 }
 
+/// A minimal JSON parser, only as general as `docs/test-vectors.json` needs:
+/// a top-level array of flat objects whose values are strings or bare
+/// integers. Not a general-purpose parser -- no dependency is worth adding
+/// for one docs artifact this crate itself generates deterministically.
+mod tinyjson {
+    use std::collections::HashMap;
+
+    pub fn parse_array_of_objects(s: &str) -> Vec<HashMap<String, String>> {
+        let mut chars = s.trim().char_indices().peekable();
+        assert_eq!(chars.next().map(|(_, c)| c), Some('['), "expected top-level array");
+        let mut out = Vec::new();
+        loop {
+            skip_ws(&mut chars, s);
+            match chars.peek().map(|&(_, c)| c) {
+                Some(']') => break,
+                Some('{') => out.push(parse_object(&mut chars, s)),
+                Some(',') => {
+                    chars.next();
+                }
+                other => panic!("unexpected {other:?} in array"),
+            }
+        }
+        out
+    }
+
+    type Chars<'a> = std::iter::Peekable<std::str::CharIndices<'a>>;
+
+    fn skip_ws(chars: &mut Chars, _s: &str) {
+        while matches!(chars.peek(), Some(&(_, c)) if c.is_whitespace()) {
+            chars.next();
+        }
+    }
+
+    fn parse_object(chars: &mut Chars, s: &str) -> HashMap<String, String> {
+        assert_eq!(chars.next().map(|(_, c)| c), Some('{'));
+        let mut map = HashMap::new();
+        loop {
+            skip_ws(chars, s);
+            match chars.peek().map(|&(_, c)| c) {
+                Some('}') => {
+                    chars.next();
+                    break;
+                }
+                Some(',') => {
+                    chars.next();
+                }
+                Some('"') => {
+                    let key = parse_string(chars);
+                    skip_ws(chars, s);
+                    assert_eq!(chars.next().map(|(_, c)| c), Some(':'));
+                    skip_ws(chars, s);
+                    let value = match chars.peek().map(|&(_, c)| c) {
+                        Some('"') => parse_string(chars),
+                        _ => parse_number(chars),
+                    };
+                    map.insert(key, value);
+                }
+                other => panic!("unexpected {other:?} in object"),
+            }
+        }
+        map
+    }
+
+    fn parse_string(chars: &mut Chars) -> String {
+        assert_eq!(chars.next().map(|(_, c)| c), Some('"'));
+        let mut out = String::new();
+        loop {
+            match chars.next().map(|(_, c)| c) {
+                Some('"') => break,
+                Some('\\') => match chars.next().map(|(_, c)| c) {
+                    Some('"') => out.push('"'),
+                    Some('\\') => out.push('\\'),
+                    other => panic!("unsupported escape {other:?}"),
+                },
+                Some(c) => out.push(c),
+                None => panic!("unterminated string"),
+            }
+        }
+        out
+    }
+
+    fn parse_number(chars: &mut Chars) -> String {
+        let mut out = String::new();
+        while matches!(chars.peek(), Some(&(_, c)) if c.is_ascii_digit() || c == '-') {
+            out.push(chars.next().unwrap().1);
+        }
+        out
+    }
+}
+
 /// Split the file into records: each blank-line-separated block of `key value`.
 fn blocks() -> Vec<HashMap<String, String>> {
     let raw = std::fs::read_to_string("docs/test-vectors.txt")
@@ -242,6 +332,62 @@ fn every_vector_is_tamper_evident() {
             assert!(
                 decode(&t, &peer, epoch, dir, &mut w).is_err(),
                 "corrupting byte {byte} was accepted"
+            );
+        }
+    }
+}
+
+/// `docs/test-vectors.json` (issue #35) must be a faithful mirror of
+/// `docs/test-vectors.txt` -- every field on every `accept` block must appear
+/// identically in the JSON object for the same vector (matched by `wire`,
+/// which is unique per vector). Both are written from the same call site in
+/// `src/bin/vectors.rs`, so a mismatch here means that guarantee broke, not
+/// that this test is checking something redundant.
+#[test]
+fn json_mirror_matches_the_text_vectors() {
+    let json_text = std::fs::read_to_string("docs/test-vectors.json")
+        .expect("docs/test-vectors.json missing; run `cargo run --bin catp-vectors`");
+    let json_objects = tinyjson::parse_array_of_objects(&json_text);
+
+    let text_accepts: Vec<_> =
+        blocks().into_iter().filter(|m| m.get("kind").map(String::as_str) == Some("accept")).collect();
+    assert!(text_accepts.len() >= 20, "only {} accept blocks in the text file", text_accepts.len());
+
+    let json_accepts: Vec<_> = json_objects
+        .iter()
+        .filter(|o| o.get("kind").map(String::as_str) == Some("accept"))
+        .collect();
+    assert_eq!(
+        text_accepts.len(),
+        json_accepts.len(),
+        "text file and JSON mirror disagree on how many accept vectors exist"
+    );
+
+    // Fields present in every text `accept` block, per accept() in
+    // src/bin/vectors.rs.
+    let fields = [
+        "device_secret",
+        "sender_id",
+        "epoch_id",
+        "direction",
+        "cipher_id",
+        "msg_type",
+        "offset",
+        "epoch_key",
+        "auth_header",
+        "wire",
+        "wire_len",
+    ];
+    for text_obj in &text_accepts {
+        let wire = &text_obj["wire"];
+        let json_obj = json_accepts
+            .iter()
+            .find(|o| o.get("wire").map(String::as_str) == Some(wire.as_str()))
+            .unwrap_or_else(|| panic!("no JSON vector with wire={wire}"));
+        for field in fields {
+            assert_eq!(
+                &text_obj[field], &json_obj[field],
+                "field {field} differs between text and JSON for wire={wire}"
             );
         }
     }
