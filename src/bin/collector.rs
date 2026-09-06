@@ -29,6 +29,16 @@ fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).expect("clock before 1970").as_millis() as u64
 }
 
+/// Render an absolute instant from an epoch and a tick offset within it
+/// (PROTOCOL.md 9.2.4, 6.4.2).
+fn at(epoch_id: u32, offset: u32) -> String {
+    let epoch_base = epoch_id as u64 * EPOCH_SECS;
+    let off = offset as u64;
+    let secs = epoch_base + off / TICKS_PER_SEC;
+    let ms = ((off % TICKS_PER_SEC) * 1000) / TICKS_PER_SEC;
+    format!("t={secs}.{ms:03}")
+}
+
 #[derive(Default)]
 struct Stats {
     accepted: u64,
@@ -47,6 +57,7 @@ fn label(mt: MsgType) -> &'static str {
         MsgType::Event => "EVENT",
         MsgType::Alarm => "ALARM",
         MsgType::Number => "NUMBER",
+        MsgType::Series => "SERIES",
         MsgType::EpochAnnounce => "EPOCH",
         MsgType::TimeAnnounce => "TIME_ANN",
         MsgType::TimeRequest => "TIME_REQ",
@@ -175,26 +186,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 stats.skipped_records += acc.skipped.len() as u64;
                 // Every record in the datagram shares this instant
                 // (PROTOCOL.md 6.4.1): the offset is a header field.
-                let epoch_base = acc.epoch_id as u64 * EPOCH_SECS;
-                let off = acc.datagram_offset as u64;
-                let secs = epoch_base + off / TICKS_PER_SEC;
-                let ms = ((off % TICKS_PER_SEC) * 1000) / TICKS_PER_SEC;
-                let at = format!("t={secs}.{ms:03}");
+                let when = at(acc.epoch_id, acc.datagram_offset);
 
-                // Dispatch on msg_type. A record-framed type and NUMBER are
-                // different shapes, and MESSAGE/EVENT/ALARM carry different
-                // handling obligations even though they frame identically.
+                // Dispatch on msg_type. A record-framed type, NUMBER, and
+                // SERIES are different shapes, and MESSAGE/EVENT/ALARM carry
+                // different handling obligations even though they frame
+                // identically.
                 match MsgType::from_u8(acc.datagram.msg_type) {
-                    Some(MsgType::Number) => {
-                        let lit = acc.datagram.number_literal().unwrap_or("<invalid utf-8>");
-                        println!("{from}  {at}  NUMBER   {lit}");
-                    }
+                    Some(MsgType::Number) => match acc.datagram.number_value() {
+                        Some((scale, mantissa)) => {
+                            println!("{from}  {when}  NUMBER   {}", format_scaled(scale, mantissa));
+                        }
+                        None => println!("{from}  {when}  NUMBER   MALFORMED"),
+                    },
+                    Some(MsgType::Series) => match acc.datagram.series_values() {
+                        // Each reading keeps the instant it was actually
+                        // taken (PROTOCOL.md 6.9): a MESSAGE batch could not
+                        // print anything but `when` for every line.
+                        Some((scale, readings)) => {
+                            for (offset, mantissa) in readings {
+                                println!(
+                                    "{from}  {}  SERIES   {}",
+                                    at(acc.epoch_id, offset),
+                                    format_scaled(scale, mantissa)
+                                );
+                            }
+                        }
+                        None => println!("{from}  {when}  SERIES   MALFORMED"),
+                    },
                     Some(mt @ (MsgType::Message | MsgType::Event | MsgType::Alarm)) => {
                         for r in &acc.datagram.records {
-                            println!("{from}  {at}  {:<8} {}", label(mt), render(r));
+                            println!("{from}  {when}  {:<8} {}", label(mt), render(r));
                         }
                     }
-                    Some(mt) => println!("{from}  {at}  {:<8} ({} bytes)", label(mt), acc.datagram.raw.len()),
+                    Some(mt) => println!("{from}  {when}  {:<8} ({} bytes)", label(mt), acc.datagram.raw.len()),
                     None => stats.other += 1,
                 }
                 for r in &acc.skipped {

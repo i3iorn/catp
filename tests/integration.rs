@@ -43,23 +43,26 @@ fn usecase_single_value_node() {
     col.provision(cfg(NODE, 1, CipherId::HmacSha256T32)).unwrap();
 
     let epoch = epoch_id_at(1_700_000_000);
-    let readings = ["21.5", "21.6", "-0.5", "0", "1013.25"];
+    // (scale, mantissa): 21.5, 21.6, -0.5, 0, 1013.2 -- varied scales and
+    // signs, one of them exactly zero.
+    let readings = [(1i64, 215i16), (1, 216), (1, -5), (1, 0), (1, 10132)];
     let mut wire_total = 0usize;
 
-    for (i, r) in readings.iter().enumerate() {
+    for (i, &(scale, mantissa)) in readings.iter().enumerate() {
         let off = (i as u32 + 1) * 4096; // one per second
-        let dg = Datagram::number(CipherId::HmacSha256T32, NODE, epoch, off, r).unwrap();
+        let dg = Datagram::number(CipherId::HmacSha256T32, NODE, epoch, off, scale as u8, mantissa)
+            .unwrap();
         let w = dg
             .encode(&secret(1), epoch, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
             .unwrap();
         wire_total += w.len();
         let acc = col.accept(&w, epoch, Direction::NodeToCollector, 0).unwrap();
-        assert_eq!(acc.datagram.number_literal(), Some(*r));
+        assert_eq!(acc.datagram.number_value(), Some((scale as u8, mantissa)));
         assert_eq!(acc.datagram_offset, off);
     }
-    // 9-byte header + literal + 4-byte tag, no record header anywhere.
-    let expected: usize = readings.iter().map(|r| 9 + r.len() + 4).sum();
-    assert_eq!(wire_total, expected);
+    // 9-byte header + 3-byte payload + 4-byte tag, fixed regardless of value,
+    // no record header anywhere.
+    assert_eq!(wire_total, readings.len() * (9 + NUMBER_PAYLOAD_LEN + 4));
 }
 
 /// A multi-sensor node: eight sensors sampled in one pass, batched into one
@@ -164,7 +167,7 @@ fn usecase_cold_start_then_transmit() {
     let epoch = epoch_id_at(clock.now(0).unwrap() as u64);
     let mut col = Collector::new();
     col.provision(cfg(NODE, 1, CipherId::HmacSha256T32)).unwrap();
-    let dg = Datagram::number(CipherId::HmacSha256T32, NODE, epoch, 128, "5.0").unwrap();
+    let dg = Datagram::number(CipherId::HmacSha256T32, NODE, epoch, 128, 1, 50).unwrap();
     let w = dg.encode(&s, epoch, Direction::NodeToCollector, MAX_DATAGRAM_IPV4).unwrap();
     assert!(col.accept(&w, epoch, Direction::NodeToCollector, 0).is_ok());
 }
@@ -211,7 +214,7 @@ fn reordered_delivery_is_accepted_replay_is_not() {
 
     let wires: Vec<Vec<u8>> = (1..=5u32)
         .map(|i| {
-            Datagram::number(CipherId::HmacSha256T32, NODE, epoch, i * 10, "1")
+            Datagram::number(CipherId::HmacSha256T32, NODE, epoch, i * 10, 1, 1)
                 .unwrap()
                 .encode(&secret(1), epoch, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
                 .unwrap()
@@ -245,7 +248,7 @@ fn loss_leaves_no_trace() {
 
     let mut delivered = 0;
     for i in 1..=100u32 {
-        let w = Datagram::number(CipherId::HmacSha256T32, NODE, epoch, i * 41, "2.5")
+        let w = Datagram::number(CipherId::HmacSha256T32, NODE, epoch, i * 41, 1, 25)
             .unwrap()
             .encode(&secret(1), epoch, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
             .unwrap();
@@ -267,7 +270,7 @@ fn epoch_rollover_accepts_previous_rejects_older() {
     let now = 13_281_250u32;
 
     for (sent_in, want_ok) in [(now, true), (now - 1, true), (now - 2, false), (now - 5, false)] {
-        let w = Datagram::number(CipherId::HmacSha256T32, NODE, sent_in, 77, "1")
+        let w = Datagram::number(CipherId::HmacSha256T32, NODE, sent_in, 77, 1, 1)
             .unwrap()
             .encode(&secret(1), sent_in, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
             .unwrap();
@@ -284,7 +287,7 @@ fn same_offset_in_adjacent_epochs_is_not_a_replay() {
     col.provision(cfg(NODE, 1, CipherId::HmacSha256T32)).unwrap();
     let now = 13_281_250u32;
     for epoch in [now - 1, now] {
-        let w = Datagram::number(CipherId::HmacSha256T32, NODE, epoch, 12345, "9")
+        let w = Datagram::number(CipherId::HmacSha256T32, NODE, epoch, 12345, 1, 9)
             .unwrap()
             .encode(&secret(1), epoch, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
             .unwrap();
@@ -304,7 +307,7 @@ fn compromised_node_cannot_impersonate_another() {
     let epoch = epoch_id_at(1_700_000_000);
 
     // Attacker holds node 2's secret and forges traffic claiming to be node 1.
-    let forged = Datagram::number(CipherId::HmacSha256T32, NODE, epoch, 5, "999")
+    let forged = Datagram::number(CipherId::HmacSha256T32, NODE, epoch, 5, 1, 999)
         .unwrap()
         .encode(&secret(2), epoch, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
         .unwrap();
@@ -322,7 +325,7 @@ fn cipher_downgrade_is_refused_pre_mac() {
     col.provision(cfg(NODE, 1, CipherId::HmacSha256T32)).unwrap(); // configured: 4-byte tag
     let epoch = epoch_id_at(1_700_000_000);
 
-    let w = Datagram::number(CipherId::HmacSha256T64, NODE, epoch, 5, "1")
+    let w = Datagram::number(CipherId::HmacSha256T64, NODE, epoch, 5, 1, 1)
         .unwrap()
         .encode(&secret(1), epoch, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
         .unwrap();
@@ -365,7 +368,7 @@ fn appended_bytes_are_rejected() {
     let mut col = Collector::new();
     col.provision(cfg(NODE, 1, CipherId::HmacSha256T32)).unwrap();
     let epoch = epoch_id_at(1_700_000_000);
-    let mut w = Datagram::number(CipherId::HmacSha256T32, NODE, epoch, 3, "1.25")
+    let mut w = Datagram::number(CipherId::HmacSha256T32, NODE, epoch, 3, 2, 125)
         .unwrap()
         .encode(&secret(1), epoch, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
         .unwrap();
@@ -430,7 +433,7 @@ fn both_implemented_ciphers_round_trip() {
     for c in [CipherId::HmacSha256T32, CipherId::HmacSha256T64] {
         let mut col = Collector::new();
         col.provision(cfg(NODE, 1, c)).unwrap();
-        let w = Datagram::number(c, NODE, epoch, 21, "3.5")
+        let w = Datagram::number(c, NODE, epoch, 21, 1, 35)
             .unwrap()
             .encode(&secret(1), epoch, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
             .unwrap();
@@ -489,7 +492,7 @@ fn offset_extremes_round_trip() {
     col.provision(cfg(NODE, 1, CipherId::HmacSha256T32)).unwrap();
     let epoch = epoch_id_at(1_700_000_000);
     for off in [0u32, 1, 4095, 4096, 65_535, 65_536, 524_286, TICKS_PER_EPOCH - 1] {
-        let w = Datagram::number(CipherId::HmacSha256T32, NODE, epoch, off, "1")
+        let w = Datagram::number(CipherId::HmacSha256T32, NODE, epoch, off, 1, 1)
             .unwrap()
             .encode(&secret(1), epoch, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
             .unwrap();
@@ -497,7 +500,7 @@ fn offset_extremes_round_trip() {
         assert_eq!(acc.datagram_offset, off);
     }
     // Beyond the field is a construction error, not a silent truncation.
-    assert!(Datagram::number(CipherId::HmacSha256T32, NODE, epoch, TICKS_PER_EPOCH, "1").is_err());
+    assert!(Datagram::number(CipherId::HmacSha256T32, NODE, epoch, TICKS_PER_EPOCH, 1, 1).is_err());
 }
 
 /// `UNSTRUCTURED` (PROTOCOL.md 6.4.2.2) is a reserved meaning, not a standing
@@ -557,7 +560,7 @@ fn rate_limit_is_enforced_through_the_collector() {
     col.provision(c).unwrap();
 
     let send = |off: u32| {
-        Datagram::number(CipherId::HmacSha256T32, NODE, epoch, off, "1")
+        Datagram::number(CipherId::HmacSha256T32, NODE, epoch, off, 1, 1)
             .unwrap()
             .encode(&secret(1), epoch, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
             .unwrap()

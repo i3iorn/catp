@@ -79,15 +79,19 @@ quietly. The second is the real cost, and it constrains what may be built here.
 
 Justifies [PROTOCOL.md](PROTOCOL.md) §6.3.
 
-At 41 bytes of IPv4 overhead, a `NUMBER` datagram carrying `23.5` is 45 bytes on
-the wire. The equivalent `MESSAGE` — a 3-byte record header plus a 2-byte
-fixed-point body — is 46, and requires a provisioned layout at both ends.
+At 41 bytes of IPv4 overhead, a `NUMBER` datagram is 44 bytes on the wire,
+fixed, regardless of what it carries: 3 payload bytes every time. The
+equivalent `MESSAGE` — a 3-byte record header plus the same 3-byte body,
+`scale` included — is 47, and requires a provisioned layout at both ends.
 
-ASCII is not the most compact encoding of a number, and this document does not
-claim otherwise: `23.5` costs 4 bytes where a scaled `int16` costs 2. What
-`NUMBER` removes is the 3-byte record header and the entire layout registry, and
-for a single short reading that trade comes out ahead. For long values, high
-precision, or several fields, it does not, and `MESSAGE` is the better choice.
+`NUMBER` was ASCII in earlier drafts of this document, which put its cost
+inside a range (`23.5` cost 4 payload bytes, longer values cost more) and made
+the comparison against `MESSAGE` a near-tie for short values. Fixed-point
+removes the range: every `NUMBER` costs exactly 3 payload bytes, so it is
+strictly smaller than the equivalent `MESSAGE` by exactly the 3-byte record
+header, every time. What `NUMBER` still gives up against `MESSAGE` is range and
+precision beyond `i16` at a chosen `scale`, and the ability to carry more than
+one field — for either of those, `MESSAGE` is the better choice.
 
 ---
 
@@ -257,6 +261,71 @@ Under the arrangement §9.2.3 specifies, extracting a node's secret yields the
 ability to forge collector traffic to **that node only** — which the attacker
 already fully controls — so the return path adds no blast radius beyond the
 compromise itself.
+
+---
+
+## R11. Why `scale` is a payload byte, not a reserved-bit selector
+
+Justifies [PROTOCOL.md](PROTOCOL.md) §6.3.1.
+
+The reserved bits of §4.2 look like the obvious place for a small selector:
+`scale` needs only 3 bits, and 5 sit unused in every header. §4.2.1 rules this
+out categorically, not as a style preference. An extension assigned to a
+reserved bit MUST be semantically optional — a receiver ignoring it must still
+reach a *correct, if less informed*, reading of the datagram. A receiver
+ignoring an unknown `scale` cannot do that: it would decode `mantissa` as a
+different value than the sender asserted, silently. That is misinterpretation,
+not under-interpretation, which is precisely the failure §4.2.1 names a channel
+or stream selector as an example of and forbids outright.
+
+The distinction that matters is where the bits are checked. A receiver that
+does not recognize a `NUMBER` datagram at all — an unsupported `version`, an
+unimplemented `msg_type` — never reaches the byte that names `scale`, exactly
+as it never reaches any other payload byte. A receiver that does recognize
+`NUMBER` is already committed to parsing this specific 3-byte layout, and
+`scale` is one more field inside it, no different in kind from `mantissa`
+itself. Payload bytes are read by receivers that already know the format;
+reserved bits are read by receivers that do not. `scale` belongs with the
+former, unconditionally.
+
+The cost is one byte per reading rather than zero. That byte is also what keeps
+the reserved bits available for the extensions §4.2.1 actually permits, in a
+space `PROTOCOL.md` §15 item 9 already flags as scarce.
+
+---
+
+## R12. What SERIES costs, and why a delta rather than an absolute offset
+
+Justifies [PROTOCOL.md](PROTOCOL.md) §6.9.
+
+Ten readings as individual `NUMBER` datagrams cost `10 * 44 = 440` bytes (R4's
+44-byte figure: 41 bytes of fixed overhead plus 3 payload bytes, each paid ten
+times). The same ten readings as one `SERIES` cost `41 + 1 + 2 + 9*4 = 80`
+bytes: the 41-byte fixed overhead paid once, `scale` once, the first reading's
+`mantissa`, and nine `(delta, mantissa)` pairs for the rest. `SERIES` wins by
+amortizing exactly the cost R2 identifies `datagram_offset` as already
+carrying for free in a single-reading datagram — the header's one instant — but
+recovers the ability to give each reading its own, which batching into
+`MESSAGE` cannot do at all (§6.4.1).
+
+Each reading after the first costs a `delta` plus a `mantissa`: 4 bytes,
+against 44 for the same reading sent alone. The saving is the header and tag
+paid once instead of `n` times, which is the same batching argument
+§6.6 makes for `MESSAGE` — `SERIES` is that argument applied to one field
+sampled repeatedly rather than several fields sampled once.
+
+`delta` is an offset from the *previous* reading, not from the datagram's own
+`datagram_offset`: consecutive real samples are close together, so the
+quantity that has to be wide is the gap between two adjacent samples, not the
+span from the first sample to the last. A `u16` delta covers gaps up to
+65535 ticks — approximately 16 seconds — between any two consecutive readings
+in one datagram; a deployment sampling more sparsely than that either flushes
+smaller batches (a `SERIES` of two is still cheaper than two `NUMBER`s) or
+accepts individual `NUMBER` datagrams for that quantity. An absolute offset per
+reading would need the same 19 bits `datagram_offset` itself uses to span an
+epoch, three bytes rather than two, to buy range no real batch needs: two
+samples far enough apart to want it are two samples that do not benefit from
+batching in the first place.
 
 ---
 

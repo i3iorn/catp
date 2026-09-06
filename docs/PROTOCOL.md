@@ -440,8 +440,9 @@ must-ignore: a type a receiver does not understand is a payload it cannot frame.
 | `0x01` | `MESSAGE` | Records | Ordinary data. One or more records (Section 6.4). |
 | `0x02` | `EVENT` | Records | Discrete occurrence, not periodic. Exactly one record. |
 | `0x03` | `ALARM` | Records | Threshold breach or fault condition. Exactly one record. |
-| `0x04` | `NUMBER` | Bare | A single numeric literal (Section 6.3). |
-| `0x05`-`0x07` | — | — | Reserved. |
+| `0x04` | `NUMBER` | Bare | A single fixed-point reading (Section 6.3). |
+| `0x05` | `SERIES` | Bare | Several readings of one quantity, each at its own instant (Section 6.9). |
+| `0x06`-`0x07` | — | — | Reserved. |
 | `0x08`-`0x0F` | — | Records | Vendor data types. |
 
 `MESSAGE` is the ordinary carrier for structured application data, and the type
@@ -456,6 +457,13 @@ batched, and both outrank `MESSAGE` in the shedding policy of Section 10.3.
 `NUMBER` is the minimal case: one value, no record header, no schema. It exists
 because a large fraction of telemetry is a single reading, and for that case the
 5-byte record header and the layout registry behind it cost more than the data.
+
+`SERIES` is `NUMBER` batched across time rather than across fields. Section
+6.4.1 gives every record in a `MESSAGE` datagram one shared capture instant, by
+design — a `MESSAGE` batch cannot be a time series. `SERIES` is the type that
+*is* one: a sender accumulating readings of a single quantity over an interval
+and flushing them together, each still carrying the instant it was actually
+taken.
 
 Vendor data types (`0x08`-`0x0F`) are record-framed exactly as standard ones are,
 so a deployment defining one still gets `format`, `schema_version`, and `size`
@@ -488,45 +496,78 @@ in the protocol depends on them crossing the wire.
 
 ### 6.3 NUMBER (`0x04`)
 
-The payload is a numeric literal in ASCII, and nothing else. There is no record
-header, no `format`, and no `schema_version`; the datagram's timestamp and
-replay position come from the header `datagram_offset` (Section 4.1).
+The payload is a fixed-point reading: a `scale` byte followed by a signed
+16-bit integer, three bytes total. There is no record header, no `format`, and
+no `schema_version`; the datagram's timestamp and replay position come from the
+header `datagram_offset` (Section 4.1).
 
 ```
-number = [ "-" ] int [ "." frac ]
-int    = "0" / ( %x31-39 *DIGIT )
-frac   = 1*DIGIT
+ 0                   1                   2
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|     scale     |         mantissa (i16)        |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 ```
 
-Receivers MUST reject a `NUMBER` payload that does not match this grammar
-exactly. Specifically:
+The value a `NUMBER` asserts is `mantissa * 10^-scale`, where `scale` is one of
+the seven values Section 6.3.1 defines.
 
-- The payload MUST be between 1 and 32 bytes.
-- Every byte MUST be a digit (`0x30`-`0x39`), a single leading minus sign
-  (`0x2D`), or the single decimal point (`0x2E`).
-- At most one `.` may appear, and it MUST have at least one digit on each side.
-  `23.` and `.5` are invalid; `23.0` and `0.5` are the correct spellings.
-- The integer part MUST NOT carry leading zeros unless it is exactly `0`.
-  `007` is invalid.
-- `-0` is invalid, as are `+`, exponents, whitespace, and any other character.
+- The payload MUST be exactly 3 bytes.
+- `scale` MUST be one of the seven values in Section 6.3.1's table. `0x00` and
+  `0x08`-`0xFF` are invalid.
+- `mantissa` is big-endian two's complement and MAY take any value in
+  `-32768..=32767`; every bit pattern is a valid reading.
 
-The grammar is canonical: exactly one byte sequence encodes any given value.
-This matters because the payload is inside the MAC scope, so two spellings of
-one reading are two different authenticated datagrams and two different replay
-entries. Trailing zeros in the fractional part are the deliberate exception —
-`23.50` and `23.5` are distinct encodings because they assert different
-measurement precision, which is information a telemetry protocol should not
-discard.
+Every `(scale, mantissa)` pair denotes exactly one value, and distinct pairs
+MAY denote the same value (`scale=2, mantissa=2350` and `scale=1,
+mantissa=235` both assert `23.5`) — unlike the ASCII grammar this section
+specified before, encoding is not required to be canonical, because a fixed
+three-byte binary payload has no leading-zero or negative-zero ambiguity to
+forbid in the first place. `scale` still carries information the receiver
+needs: it is the only place precision is recorded, so choosing a scale finer
+than the sensor's actual resolution asserts precision the reading does not
+have.
 
 How `NUMBER` compares in size with the equivalent `MESSAGE` is in
 [RATIONALE.md](RATIONALE.md) R4.
 
-#### 6.3.1 What NUMBER does not carry
+#### 6.3.1 Decimal scale
 
-`NUMBER` has no units, no sensor identifier, and no schema. A receiver learns
-only that a particular `sender_id` reported a particular value at a particular
-instant. The meaning of that value MUST therefore be fixed for the lifetime of
-the `sender_id` and recorded out of band.
+`scale` names a power-of-ten divisor, shared by `NUMBER` and `SERIES`
+(Section 6.9) so the two types agree on what a reading means.
+
+| `scale` | Divisor | Example: `mantissa = 2350` |
+|---|---|---|
+| `0x00` | — | Invalid. MUST be rejected. |
+| `0x01` | `10^-1` | `235.0` |
+| `0x02` | `10^-2` | `23.50` |
+| `0x03` | `10^-3` | `2.350` |
+| `0x04` | `10^-4` | `0.2350` |
+| `0x05` | `10^-5` | `0.02350` |
+| `0x06` | `10^-6` | `0.002350` |
+| `0x07` | `10^-7` | `0.0002350` |
+| `0x08`-`0xFF` | — | Invalid. MUST be rejected. |
+
+Seven levels span the range a 16-bit mantissa makes useful: at `0x01` the
+represented magnitude reaches into the low millions before overflowing
+`mantissa`, and at `0x07` the smallest nonzero step is ten-millionths. A
+deployment needing a value outside `i16` range at a useful scale, more than
+seven decimal digits of precision, or a non-decimal unit MUST use `MESSAGE`
+with a deployment-defined layout instead.
+
+`0x00` is invalid for the same reason `format` `0x00` and `schema_version`
+`0x00` are (Section 6.4.2, 6.4.2.1): a zero-filled buffer must not decode as a
+valid reading.
+
+Why this lives in three payload bytes rather than in the header's reserved
+bits is in [RATIONALE.md](RATIONALE.md) R11.
+
+#### 6.3.2 What NUMBER does not carry
+
+`NUMBER` has no units, no sensor identifier, and no schema beyond `scale`. A
+receiver learns only that a particular `sender_id` reported a particular value
+at a particular instant. The unit that value is measured in MUST therefore be
+fixed for the lifetime of the `sender_id` and recorded out of band.
 
 This is a real constraint, and it bounds where `NUMBER` fits. A node reporting
 one quantity — a meter, a probe, a counter — is served well by it. A node
@@ -896,6 +937,56 @@ vector triggered by unauthenticated input.
 Receivers MUST silently discard datagrams failing verification. Authentication
 failures SHOULD be surfaced locally through logs or metrics.
 
+### 6.9 SERIES (`0x05`)
+
+The payload is a shared `scale` (Section 6.3.1), the first reading, and zero or
+more further readings each carrying its own offset from the previous one:
+
+```
+ 0                   1                   2
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|     scale     |     mantissa[0] (i16)         |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|          delta[1] (u16)      |  mantissa[1]  ...
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+                       ...
+```
+
+- `scale` (Section 6.3.1) applies to every `mantissa` in the datagram. A
+  reading is `mantissa * 10^-scale`, exactly as for `NUMBER`.
+- The header `datagram_offset` (Section 4.1) is `mantissa[0]`'s instant.
+  Reading `i`'s instant, for `i >= 1`, is the previous reading's instant plus
+  `delta[i]` ticks.
+- `delta` is 16 bits, unsigned, and MUST be at least `1`: readings MUST have
+  strictly increasing instants, the same rule Section 10.1 states for
+  `datagram_offset` itself. `delta = 0` MUST be rejected.
+- The payload MUST be `3 + 4n` bytes for some integer `n >= 1`: the first
+  reading plus at least one `(delta, mantissa)` pair. A single reading MUST
+  use `NUMBER` instead — see Section 6.6 for why a batch of one has nothing to
+  amortize.
+- There is no count field. `n` is recoverable from the payload length
+  (Section 6.4.3's reasoning for records applies here identically), and a
+  receiver MUST reject a payload whose length is not `3 + 4n`.
+- Every reading's reconstructed instant MUST fall within the epoch the header
+  names: a `SERIES` datagram MUST NOT span an epoch boundary, exactly as
+  Section 10.3 already requires of a `MESSAGE` batch. A sender reaching a
+  boundary mid-batch MUST flush under the old epoch before continuing. A
+  receiver MUST reject a payload whose cumulative offset reaches or exceeds
+  `TICKS_PER_EPOCH` (Section 9.1).
+
+`SERIES` has no record header and no `schema_version` per reading — the type
+itself names the layout, the same design choice Section 6.3.2 makes for
+`NUMBER`, extended across time rather than restated per sample. The cost is the
+same constraint `NUMBER` accepts: one quantity, one `sender_id`, meaning fixed
+out of band. A node reporting several quantities per batch MUST use `MESSAGE`
+with per-reading timestamps in the record body (Section 6.4.1), or a distinct
+`SERIES`-bearing `sender_id` per quantity.
+
+What `SERIES` costs against `n` individual `NUMBER` datagrams, and why the
+per-reading cost is a `delta` rather than an absolute offset, is in
+[RATIONALE.md](RATIONALE.md) R12.
+
 ---
 
 ## 7. Authentication
@@ -994,8 +1085,9 @@ failure:
    reconstructed `epoch_id`.
 8. `datagram_offset` passes the replay window check (Section 10.2).
 9. The payload frames cleanly — into records for a record-framed type
-   (Section 6.4.4), against the grammar for `NUMBER` (Section 6.3), or against
-   the fixed layout for a control type (Section 6.7).
+   (Section 6.4.4), against the fixed layout for `NUMBER` (Section 6.3) or
+   `SERIES` (Section 6.9), or against the fixed layout for a control type
+   (Section 6.7).
 10. Records of unrecognized `(format, schema_version)` are skipped individually
     (Section 6.4.4). This is the only step that discards part of a datagram
     rather than all of it.
@@ -1805,9 +1897,14 @@ implementation accompanying this document publishes them as
 - A boundary set: `datagram_offset` at `0` and at `524287`, first datagram of a
   new epoch, `size` at 1 and at 4095, and a datagram from the preceding epoch
   arriving after an epoch change.
-- `NUMBER` acceptance: `0`, `-0.5`, `23.50`, and a 32-byte literal. Plus
-  rejections: empty, `23.`, `.5`, `007`, `-0`, `+1`, `1e3`, `1.2.3`, a 33-byte
-  literal, and any payload containing a non-grammar byte.
+- `NUMBER` acceptance: `scale` `0x01` and `0x07` (the defined range's ends),
+  `mantissa` at `0`, `i16::MIN`, and `i16::MAX`. Plus rejections: `scale`
+  `0x00`, `scale` `0x08`, a 2-byte payload, and a 4-byte payload.
+- `SERIES` acceptance: two readings (the minimum), a payload filling
+  `payload_budget` (Section 6.6), and a `delta` of `1` and of `65535`. Plus
+  rejections: a 3-byte payload (first reading, no further entries), a payload
+  of `3 + 4n + 1` or `3 + 4n + 2` bytes (misaligned trailer), `delta = 0`, and a
+  cumulative offset reaching `TICKS_PER_EPOCH`.
 - Cold start: a `TIME_ANNOUNCE` accepted by a clockless node, one rejected for
   asserting a time at or below `last_epoch * 128`, and one rejected because the
   node's clock is already valid.
