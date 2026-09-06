@@ -41,7 +41,7 @@ If your telemetry content is itself sensitive, CATP is the wrong protocol. See
 Rust, no unsafe, three dependencies (`hmac`, `sha2`, `hkdf`).
 
 ```
-src/lib.rs      key schedule, epoch math, replay window, NUMBER grammar, pacer
+src/lib.rs      key schedule, epoch math, replay window, NUMBER/SERIES codec, pacer
 src/wire.rs     datagram and record codec, verification order of §7.4
 src/control.rs  EPOCH_ANNOUNCE, TIME_ANNOUNCE, TIME_REQUEST, HEARTBEAT, CAPABILITY_ADVERTISE
 src/peer.rs     per-epoch replay windows, multi-peer collector, cold-start clock
@@ -59,7 +59,8 @@ Start a collector:
 cargo run --bin catp-collector 127.0.0.1:9999
 ```
 
-Point a sender at it — it emits MESSAGE, NUMBER, EVENT, and ALARM traffic:
+Point a sender at it — it emits MESSAGE, NUMBER, SERIES, EVENT, and ALARM
+traffic:
 
 ```bash
 cargo run --bin catp-sender 127.0.0.1:9999 4
@@ -71,7 +72,15 @@ cargo run --bin catp-sender 127.0.0.1:9999 4
 127.0.0.1:46229  t=1788274214.561  EVENT    seq=3     configuration_changed
 127.0.0.1:46229  t=1788274215.062  ALARM    seq=5     [CRITICAL] sensor_failure
 127.0.0.1:46229  t=1788274215.813  NUMBER   20.38
+127.0.0.1:46229  t=1788274216.375  SERIES   19.47
+127.0.0.1:46229  t=1788274216.424  SERIES   24.18
+127.0.0.1:46229  t=1788274216.473  SERIES   20.38
 ```
+
+The three `SERIES` lines above come from a single datagram: one quantity
+batched across time, each reading still carrying the instant it was actually
+taken (§6.9) — unlike a `MESSAGE` batch, which shares one capture instant
+across all its records (§6.4.1).
 
 Each MESSAGE carries one observation as two records: once under a layout the
 collector holds a definition for, and once as `schema_version` `0xFF`

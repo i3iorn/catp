@@ -333,7 +333,7 @@ mod tests {
         // Same offset in two adjacent epochs: both accepted, because offsets
         // reset each epoch and each epoch has its own window.
         for epoch in [e - 1, e] {
-            let dg = Datagram::number(CipherId::HmacSha256T32, 1, epoch, 4242, "1.5").unwrap();
+            let dg = Datagram::number(CipherId::HmacSha256T32, 1, epoch, 4242, 1, 15).unwrap();
             let w = dg.encode(&secret, epoch, Direction::NodeToCollector, MAX_DATAGRAM_IPV4).unwrap();
             assert!(st.accept(&w, e, Direction::NodeToCollector, 0).is_ok(), "epoch {epoch}");
         }
@@ -352,7 +352,7 @@ mod tests {
         })
         .unwrap();
         for epoch in 1000..1010u32 {
-            let dg = Datagram::number(CipherId::HmacSha256T32, 1, epoch, 7, "1").unwrap();
+            let dg = Datagram::number(CipherId::HmacSha256T32, 1, epoch, 7, 1, 10).unwrap();
             let w = dg.encode(&secret, epoch, Direction::NodeToCollector, MAX_DATAGRAM_IPV4).unwrap();
             st.accept(&w, epoch, Direction::NodeToCollector, 0).unwrap();
             assert!(st.live_windows() <= 2, "epoch {epoch}: {} windows", st.live_windows());
@@ -367,7 +367,7 @@ mod tests {
         let e = 500u32;
 
         for id in [0xAAAAu32, 0xBBBB] {
-            let dg = Datagram::number(CipherId::HmacSha256T32, id, e, 99, "7").unwrap();
+            let dg = Datagram::number(CipherId::HmacSha256T32, id, e, 99, 1, 70).unwrap();
             let w = dg
                 .encode(&cfg(id).secret, e, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
                 .unwrap();
@@ -376,7 +376,7 @@ mod tests {
         }
 
         // An unprovisioned sender is rejected with no state allocated.
-        let dg = Datagram::number(CipherId::HmacSha256T32, 0xCCCC, e, 99, "7").unwrap();
+        let dg = Datagram::number(CipherId::HmacSha256T32, 0xCCCC, e, 99, 1, 70).unwrap();
         let w = dg
             .encode(&cfg(0xCCCC).secret, e, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
             .unwrap();
@@ -392,7 +392,7 @@ mod tests {
         c.provision(cfg(0xAAAA)).unwrap();
         let e = 500u32;
         // Claim to be AAAA but sign with BBBB's secret (PROTOCOL.md 9.2.1).
-        let dg = Datagram::number(CipherId::HmacSha256T32, 0xAAAA, e, 5, "1").unwrap();
+        let dg = Datagram::number(CipherId::HmacSha256T32, 0xAAAA, e, 5, 1, 10).unwrap();
         let w = dg
             .encode(&cfg(0xBBBB).secret, e, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
             .unwrap();
@@ -430,7 +430,7 @@ mod tests {
         .unwrap();
         let e = 2000u32;
         let send = |off: u32| {
-            Datagram::number(CipherId::HmacSha256T32, 1, e, off, "1")
+            Datagram::number(CipherId::HmacSha256T32, 1, e, off, 1, 10)
                 .unwrap()
                 .encode(&secret, e, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
                 .unwrap()

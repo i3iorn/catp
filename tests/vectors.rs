@@ -123,7 +123,7 @@ fn every_accept_vector_verifies_and_reencodes() {
 fn reserved_bit_vector_is_ignored_not_rejected() {
     let m = blocks()
         .into_iter()
-        .find(|m| m.get("offset").map(String::as_str) == Some("4") && m.contains_key("wire"))
+        .find(|m| m.get("offset").map(String::as_str) == Some("8") && m.contains_key("wire"))
         .expect("reserved-bits vector missing");
     let wire = unhex(&m["wire"]);
     // Byte 2 holds reserved in its high 5 bits.
@@ -140,7 +140,7 @@ fn reserved_bit_vector_is_ignored_not_rejected() {
     let mut w = ReplayWindow::one_second();
     let acc = decode(&wire, &peer, m["epoch_id"].parse().unwrap(), Direction::NodeToCollector, &mut w)
         .expect("reserved bits must not cause rejection");
-    assert_eq!(acc.datagram.number_literal(), Some("1"));
+    assert_eq!(acc.datagram.number_value(), Some((1, 10))); // 10 * 10^-1 = 1.0
 }
 
 /// The TIME_ANNOUNCE vector verifies under its own key schedule.
@@ -194,20 +194,19 @@ fn time_request_vector_verifies_and_is_directional() {
     );
 }
 
-/// Every literal the vectors mark accepted must pass, and every one marked
-/// rejected must fail (PROTOCOL.md 6.3).
+/// Every payload the vectors mark accepted must pass, and every one marked
+/// rejected must fail (PROTOCOL.md 6.3, 6.3.1).
 #[test]
 fn number_grammar_matches_the_vectors() {
     let ok = scalar_lines("accept_number");
     let bad = scalar_lines("reject_number");
-    assert!(ok.len() >= 8 && bad.len() >= 12, "grammar vectors look thin");
+    assert!(ok.len() >= 6 && bad.len() >= 4, "NUMBER vectors look thin");
 
     for l in &ok {
-        assert!(validate_number(l.as_bytes()).is_ok(), "{l} should be accepted");
+        assert!(validate_number(&unhex(l)).is_ok(), "{l} should be accepted");
     }
     for l in &bad {
-        let raw = if l == "<empty>" { "" } else { l.as_str() };
-        assert!(validate_number(raw.as_bytes()).is_err(), "{l} should be rejected");
+        assert!(validate_number(&unhex(l)).is_err(), "{l} should be rejected");
     }
 }
 

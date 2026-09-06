@@ -28,6 +28,9 @@ const CIPHER: CipherId = CipherId::HmacSha256T32;
 const SENSOR_SCHEMA: u8 = 1;
 const EVENT_SCHEMA: u8 = 2;
 const ALARM_SCHEMA: u8 = 3;
+// Hundredths (PROTOCOL.md 6.3.1): matches sensor_values' temperature, which
+// is already an i16 in hundredths of a degree.
+const SENSOR_SCALE: u8 = 2;
 // PROTOCOL.md 6.4.2.2: reserved, means "no field definition is claimed".
 // Deployment-assigned values stop at 0xFE.
 const UNSTRUCTURED: u8 = SCHEMA_UNSTRUCTURED;
@@ -44,6 +47,7 @@ fn now() -> (u64, u32) {
 enum MessageKind {
     Message,
     Number,
+    Series,
     Event,
     Alarm,
 }
@@ -53,6 +57,7 @@ impl MessageKind {
         match self {
             Self::Message => "MESSAGE",
             Self::Number => "NUMBER ",
+            Self::Series => "SERIES ",
             Self::Event => "EVENT  ",
             Self::Alarm => "ALERT  ",
         }
@@ -78,9 +83,10 @@ fn choose_kind(seq: u32) -> MessageKind {
     // The irregular-looking pattern prevents the test stream from becoming
     // simply MESSAGE/NUMBER/EVENT/ALERT repeated forever.
     match mix(seq) % 16 {
-        0..=7 => MessageKind::Message,
-        8..=10 => MessageKind::Number,
-        11..=13 => MessageKind::Event,
+        0..=6 => MessageKind::Message,
+        7..=9 => MessageKind::Number,
+        10..=11 => MessageKind::Series,
+        12..=13 => MessageKind::Event,
         _ => MessageKind::Alarm,
     }
 }
@@ -158,9 +164,25 @@ fn make_records(seq: u32) -> Vec<Record> {
     ]
 }
 
-fn make_number(seq: u32) -> String {
+/// One reading, fixed-point (PROTOCOL.md 6.3): `temp` is already an i16 in
+/// hundredths of a degree, so it is `SERIES_ENTRY_LEN`'s mantissa directly.
+fn make_number(seq: u32) -> (u8, i16) {
     let (temp, _, _, _, _) = sensor_values(seq);
-    format!("{}.{:02}", temp / 100, temp % 100)
+    (SENSOR_SCALE, temp)
+}
+
+/// Several temperature readings taken moments apart, batched into one
+/// SERIES (PROTOCOL.md 6.9) -- as if buffered and flushed together, each
+/// keeping the instant it was actually taken. This is the case a MESSAGE
+/// batch cannot represent at all (Section 6.4.1): several instants of one
+/// quantity, rather than one instant of several.
+fn make_readings(seq: u32, offset: u32) -> Vec<(u32, i16)> {
+    (0..3u32)
+        .map(|i| {
+            let (temp, _, _, _, _) = sensor_values(seq.wrapping_add(i));
+            (offset + i * 200, temp)
+        })
+        .collect()
 }
 
 fn event_payload(seq: u32) -> &'static str {
@@ -216,15 +238,15 @@ fn make_datagram(
         }
 
         MessageKind::Number => {
-            let literal = make_number(seq);
+            let (scale, mantissa) = make_number(seq);
 
-            Datagram::number(
-                CIPHER,
-                SENDER_ID,
-                epoch,
-                offset,
-                &literal,
-            )
+            Datagram::number(CIPHER, SENDER_ID, epoch, offset, scale, mantissa)
+        }
+
+        MessageKind::Series => {
+            let readings = make_readings(seq, offset);
+
+            Datagram::series(CIPHER, SENDER_ID, epoch, SENSOR_SCALE, &readings)
         }
 
         MessageKind::Event => {
@@ -342,7 +364,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     MessageKind::Number => {
-                        format!("value={}", make_number(seq))
+                        let (scale, mantissa) = make_number(seq);
+                        format!("value={}", format_scaled(scale, mantissa))
+                    }
+
+                    MessageKind::Series => {
+                        let readings = make_readings(seq, offset);
+                        let values: Vec<String> = readings
+                            .iter()
+                            .map(|&(_, m)| format_scaled(SENSOR_SCALE, m))
+                            .collect();
+                        format!("readings={} values=[{}]", readings.len(), values.join(", "))
                     }
 
                     MessageKind::Event => {

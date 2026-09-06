@@ -127,20 +127,76 @@ impl Datagram {
         Ok(d)
     }
 
-    /// Build a `NUMBER` datagram from a numeric literal (PROTOCOL.md 6.3).
+    /// Build a `NUMBER` datagram: a fixed-point reading, `mantissa *
+    /// 10^-scale` (PROTOCOL.md 6.3). `scale` MUST be `0x01..=0x07`
+    /// (Section 6.3.1).
     pub fn number(
         cipher: CipherId,
         sender_id: u32,
         epoch_id: u32,
         datagram_offset: u32,
-        literal: &str,
+        scale: u8,
+        mantissa: i16,
     ) -> Result<Self, Error> {
-        validate_number(literal.as_bytes())?;
+        if !scale_is_valid(scale) {
+            return Err(Error::BadNumber("scale must be 0x01..=0x07"));
+        }
         if datagram_offset >= TICKS_PER_EPOCH {
             return Err(Error::Framing("datagram_offset exceeds 19 bits"));
         }
         let mut d = Self::base(MsgType::Number, cipher, sender_id, epoch_id, datagram_offset);
-        d.raw = literal.as_bytes().to_vec();
+        d.raw = vec![scale];
+        d.raw.extend_from_slice(&mantissa.to_be_bytes());
+        Ok(d)
+    }
+
+    /// Build a `SERIES` datagram: `scale` shared by every reading, each at
+    /// its own instant (PROTOCOL.md 6.9).
+    ///
+    /// `readings` are `(datagram_offset, mantissa)` pairs, absolute instants
+    /// within the epoch, in strictly increasing order; there MUST be at
+    /// least two (a single reading MUST use `number` instead). The first
+    /// reading's instant becomes this datagram's `datagram_offset`; each
+    /// later one is encoded as a `delta` from its predecessor, which MUST
+    /// therefore fit in 16 bits (Section 6.9) -- consecutive readings more
+    /// than 65535 ticks apart do not fit one `SERIES` batch.
+    pub fn series(
+        cipher: CipherId,
+        sender_id: u32,
+        epoch_id: u32,
+        scale: u8,
+        readings: &[(u32, i16)],
+    ) -> Result<Self, Error> {
+        if !scale_is_valid(scale) {
+            return Err(Error::BadSeries("scale must be 0x01..=0x07"));
+        }
+        if readings.len() < 2 {
+            return Err(Error::BadSeries("SERIES must carry at least two readings"));
+        }
+        let (first_offset, first_mantissa) = readings[0];
+        if first_offset >= TICKS_PER_EPOCH {
+            return Err(Error::Framing("datagram_offset exceeds 19 bits"));
+        }
+        let mut raw = Vec::with_capacity(NUMBER_PAYLOAD_LEN + SERIES_ENTRY_LEN * (readings.len() - 1));
+        raw.push(scale);
+        raw.extend_from_slice(&first_mantissa.to_be_bytes());
+        let mut prev = first_offset;
+        for &(offset, mantissa) in &readings[1..] {
+            if offset <= prev {
+                return Err(Error::BadSeries("reading instants must strictly increase"));
+            }
+            let delta: u16 = (offset - prev)
+                .try_into()
+                .map_err(|_| Error::BadSeries("gap between readings exceeds 65535 ticks"))?;
+            raw.extend_from_slice(&delta.to_be_bytes());
+            raw.extend_from_slice(&mantissa.to_be_bytes());
+            prev = offset;
+        }
+        if prev >= TICKS_PER_EPOCH {
+            return Err(Error::BadSeries("reading instant crosses the epoch boundary"));
+        }
+        let mut d = Self::base(MsgType::Series, cipher, sender_id, epoch_id, first_offset);
+        d.raw = raw;
         Ok(d)
     }
 
@@ -301,10 +357,22 @@ impl Datagram {
         Ok(out)
     }
 
-    /// The `NUMBER` literal, if this is one.
-    pub fn number_literal(&self) -> Option<&str> {
+    /// The `NUMBER` reading, if this is one: `(scale, mantissa)`
+    /// (PROTOCOL.md 6.3).
+    pub fn number_value(&self) -> Option<(u8, i16)> {
         if self.msg_type == MsgType::Number as u8 {
-            std::str::from_utf8(&self.raw).ok()
+            validate_number(&self.raw).ok()
+        } else {
+            None
+        }
+    }
+
+    /// The `SERIES` readings, if this is one: shared `scale` plus each
+    /// reading's `(instant, mantissa)`, instants in strictly increasing
+    /// order (PROTOCOL.md 6.9).
+    pub fn series_values(&self) -> Option<(u8, Vec<(u32, i16)>)> {
+        if self.msg_type == MsgType::Series as u8 {
+            validate_series(&self.raw, self.datagram_offset).ok()
         } else {
             None
         }
@@ -544,6 +612,9 @@ pub fn decode(
     } else if mt == MsgType::Number {
         validate_number(payload)?;
         out.raw = payload.to_vec();
+    } else if mt == MsgType::Series {
+        validate_series(payload, datagram_offset)?;
+        out.raw = payload.to_vec();
     } else {
         out.raw = payload.to_vec();
     }
@@ -611,7 +682,7 @@ mod tests {
         // Regression guard for reading bytes 3..5 as a u16 (PROTOCOL.md 4.1).
         let p = peer();
         for off in [0u32, 65_535, 65_536, 300_000, TICKS_PER_EPOCH - 1] {
-            let dg = Datagram::number(CipherId::HmacSha256T32, p.sender_id, EPOCH, off, "1.5").unwrap();
+            let dg = Datagram::number(CipherId::HmacSha256T32, p.sender_id, EPOCH, off, 1, 15).unwrap();
             let wire = dg.encode(&p.secret, EPOCH, Direction::NodeToCollector, MAX_DATAGRAM_IPV4).unwrap();
             let mut w = ReplayWindow::one_second();
             let acc = decode(&wire, &p, EPOCH, Direction::NodeToCollector, &mut w).unwrap();
@@ -622,19 +693,20 @@ mod tests {
     #[test]
     fn number_roundtrip_and_size() {
         let p = peer();
-        let dg = Datagram::number(CipherId::HmacSha256T32, p.sender_id, EPOCH, 42, "23.5").unwrap();
+        let dg = Datagram::number(CipherId::HmacSha256T32, p.sender_id, EPOCH, 42, 1, 235).unwrap();
         let wire = dg.encode(&p.secret, EPOCH, Direction::NodeToCollector, MAX_DATAGRAM_IPV4).unwrap();
-        assert_eq!(wire.len(), HEADER_LEN + 4 + 4); // 9 header + "23.5" + 4 tag
+        assert_eq!(wire.len(), HEADER_LEN + NUMBER_PAYLOAD_LEN + 4); // 9 header + 3 payload + 4 tag
         let mut w = ReplayWindow::one_second();
         let acc = decode(&wire, &p, EPOCH, Direction::NodeToCollector, &mut w).unwrap();
-        assert_eq!(acc.datagram.number_literal(), Some("23.5"));
+        assert_eq!(acc.datagram.number_value(), Some((1, 235))); // 235 * 10^-1 = 23.5
         assert_eq!(acc.datagram_offset, 42);
     }
 
     #[test]
     fn number_beats_equivalent_message_on_the_wire() {
         let p = peer();
-        let n = Datagram::number(CipherId::HmacSha256T32, p.sender_id, EPOCH, 1, "23.5")
+        // Same value, same precision (scale=2, i.e. hundredths): 23.50.
+        let n = Datagram::number(CipherId::HmacSha256T32, p.sender_id, EPOCH, 1, 2, 2350)
             .unwrap()
             .encode(&p.secret, EPOCH, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
             .unwrap();
@@ -648,9 +720,10 @@ mod tests {
     #[test]
     fn malformed_number_rejected_after_auth() {
         let p = peer();
-        // Authenticate a bad literal the way a defective sender would.
-        let mut dg = Datagram::number(CipherId::HmacSha256T32, p.sender_id, EPOCH, 7, "1").unwrap();
-        dg.raw = b"23.".to_vec();
+        // Authenticate a bad payload the way a defective sender would: same
+        // length, but scale 0x00 is invalid (PROTOCOL.md 6.3.1).
+        let mut dg = Datagram::number(CipherId::HmacSha256T32, p.sender_id, EPOCH, 7, 1, 10).unwrap();
+        dg.raw = vec![0x00, 0x00, 0x01];
         let wire = dg.encode(&p.secret, EPOCH, Direction::NodeToCollector, MAX_DATAGRAM_IPV4).unwrap();
         let mut w = ReplayWindow::one_second();
         assert!(matches!(
@@ -792,7 +865,7 @@ mod tests {
     #[test]
     fn number_and_message_share_one_replay_window() {
         let p = peer();
-        let n = Datagram::number(CipherId::HmacSha256T32, p.sender_id, EPOCH, 500, "1")
+        let n = Datagram::number(CipherId::HmacSha256T32, p.sender_id, EPOCH, 500, 1, 10)
             .unwrap()
             .encode(&p.secret, EPOCH, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
             .unwrap();

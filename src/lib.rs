@@ -48,8 +48,19 @@ pub const HEADER_LEN: usize = 9;
 /// Record header length in bytes.
 pub const RECORD_HEADER_LEN: usize = 3;
 
-/// Longest legal `NUMBER` payload (PROTOCOL.md 6.3).
-pub const MAX_NUMBER_LEN: usize = 32;
+/// Fixed length of a `NUMBER` payload: one `scale` byte plus a 16-bit
+/// `mantissa` (PROTOCOL.md 6.3).
+pub const NUMBER_PAYLOAD_LEN: usize = 3;
+
+/// Bytes per `(delta, mantissa)` entry after a `SERIES` payload's first
+/// reading (PROTOCOL.md 6.9).
+pub const SERIES_ENTRY_LEN: usize = 4;
+
+/// Lowest valid `scale` (PROTOCOL.md 6.3.1): divisor `10^-1`.
+pub const SCALE_MIN: u8 = 0x01;
+
+/// Highest valid `scale` (PROTOCOL.md 6.3.1): divisor `10^-7`.
+pub const SCALE_MAX: u8 = 0x07;
 
 /// `schema_version` meaning "no field definition is claimed for this body"
 /// (PROTOCOL.md 6.4.2.2).
@@ -123,6 +134,7 @@ pub enum MsgType {
     Event = 0x02,
     Alarm = 0x03,
     Number = 0x04,
+    Series = 0x05,
     EpochAnnounce = 0x10,
     TimeAnnounce = 0x11,
     TimeRequest = 0x12,
@@ -144,6 +156,7 @@ impl MsgType {
             0x02 => Some(Self::Event),
             0x03 => Some(Self::Alarm),
             0x04 => Some(Self::Number),
+            0x05 => Some(Self::Series),
             0x10 => Some(Self::EpochAnnounce),
             0x11 => Some(Self::TimeAnnounce),
             0x12 => Some(Self::TimeRequest),
@@ -215,8 +228,10 @@ pub enum Error {
     Oversize(usize),
     /// Sender may not reuse a `datagram_offset` within an epoch.
     OffsetReuse(u32),
-    /// `NUMBER` payload violates the grammar of PROTOCOL.md 6.3.
+    /// `NUMBER` payload violates the fixed layout of PROTOCOL.md 6.3.
     BadNumber(&'static str),
+    /// `SERIES` payload violates the fixed layout of PROTOCOL.md 6.9.
+    BadSeries(&'static str),
     /// `EPOCH_ANNOUNCE` at or below the highest accepted (PROTOCOL.md 9.4).
     EpochRollback { got: u32, hi: u32 },
     /// `TIME_ANNOUNCE` at or below the persisted floor (PROTOCOL.md 11.4).
@@ -235,52 +250,80 @@ pub enum Error {
     CipherRequiresRateLimit(u8),
 }
 
-/// Validate a `NUMBER` payload against the grammar of PROTOCOL.md 6.3.
+/// Is `scale` one of the seven divisors PROTOCOL.md 6.3.1 defines?
+pub fn scale_is_valid(scale: u8) -> bool {
+    (SCALE_MIN..=SCALE_MAX).contains(&scale)
+}
+
+/// Render `mantissa * 10^-scale` in decimal, e.g. `(2, 2350) -> "23.50"`
+/// (PROTOCOL.md 6.3.1). For display only; the wire value is the
+/// `(scale, mantissa)` pair, not this string.
+pub fn format_scaled(scale: u8, mantissa: i16) -> String {
+    format!("{:.*}", scale as usize, mantissa as f64 / 10f64.powi(scale as i32))
+}
+
+/// Validate and decode a `NUMBER` payload (PROTOCOL.md 6.3): exactly
+/// [`NUMBER_PAYLOAD_LEN`] bytes, a valid `scale`, and a big-endian `mantissa`.
+/// Every bit pattern of `mantissa` is legal, so once `scale` and the length
+/// check pass, decoding cannot fail.
+pub fn validate_number(p: &[u8]) -> Result<(u8, i16), Error> {
+    if p.len() != NUMBER_PAYLOAD_LEN {
+        return Err(Error::BadNumber("payload must be exactly 3 bytes"));
+    }
+    let scale = p[0];
+    if !scale_is_valid(scale) {
+        return Err(Error::BadNumber("scale must be 0x01..=0x07"));
+    }
+    Ok((scale, i16::from_be_bytes([p[1], p[2]])))
+}
+
+/// Validate and decode a `SERIES` payload (PROTOCOL.md 6.9).
 ///
-/// `[-] int [ "." frac ]`, canonical: no leading zeros unless the integer part
-/// is exactly `0`, no `-0`, no bare `23.` or `.5`, no exponent or sign prefix.
-/// Trailing zeros in the fraction are allowed and significant.
-pub fn validate_number(p: &[u8]) -> Result<(), Error> {
-    if p.is_empty() {
-        return Err(Error::BadNumber("empty"));
+/// `anchor_offset` is the datagram's own `datagram_offset`, which is the
+/// first reading's instant; each later reading's instant is the previous
+/// one plus that entry's `delta`. Returns the shared `scale` and every
+/// reading as `(instant, mantissa)`, instants in strictly increasing order.
+///
+/// Rejects a payload that isn't `3 + 4n` bytes for `n >= 1`, a `scale`
+/// outside `0x01..=0x07`, any `delta` of `0`, and cumulative offsets that
+/// would reach or exceed `TICKS_PER_EPOCH` -- a `SERIES` batch MUST NOT span
+/// an epoch boundary, exactly as a `MESSAGE` batch MUST NOT (PROTOCOL.md
+/// 10.3).
+pub fn validate_series(p: &[u8], anchor_offset: u32) -> Result<(u8, Vec<(u32, i16)>), Error> {
+    if p.len() < NUMBER_PAYLOAD_LEN {
+        return Err(Error::BadSeries("shorter than scale + first reading"));
     }
-    if p.len() > MAX_NUMBER_LEN {
-        return Err(Error::BadNumber("longer than 32 bytes"));
+    let scale = p[0];
+    if !scale_is_valid(scale) {
+        return Err(Error::BadSeries("scale must be 0x01..=0x07"));
     }
-    let neg = p[0] == b'-';
-    let digits = if neg { &p[1..] } else { p };
-    if digits.is_empty() {
-        return Err(Error::BadNumber("sign with no digits"));
+    let rest = &p[NUMBER_PAYLOAD_LEN..];
+    if rest.is_empty() {
+        return Err(Error::BadSeries("SERIES must carry at least two readings"));
     }
-    let (int, frac) = match digits.iter().position(|&c| c == b'.') {
-        Some(i) => (&digits[..i], Some(&digits[i + 1..])),
-        None => (digits, None),
-    };
-    if int.is_empty() {
-        return Err(Error::BadNumber("no integer part"));
+    let (entries, remainder) = rest.as_chunks::<SERIES_ENTRY_LEN>();
+    if !remainder.is_empty() {
+        return Err(Error::BadSeries("trailing entries must be 4 bytes each"));
     }
-    if !int.iter().all(|c| c.is_ascii_digit()) {
-        return Err(Error::BadNumber("non-digit in integer part"));
+    if anchor_offset >= TICKS_PER_EPOCH {
+        return Err(Error::BadSeries("datagram_offset exceeds 19 bits"));
     }
-    if int.len() > 1 && int[0] == b'0' {
-        return Err(Error::BadNumber("leading zero"));
-    }
-    if let Some(f) = frac {
-        if f.is_empty() {
-            return Err(Error::BadNumber("trailing decimal point"));
+    let first = i16::from_be_bytes([p[1], p[2]]);
+    let mut readings = Vec::with_capacity(1 + entries.len());
+    readings.push((anchor_offset, first));
+    let mut cum = anchor_offset;
+    for entry in entries {
+        let delta = u16::from_be_bytes([entry[0], entry[1]]);
+        if delta == 0 {
+            return Err(Error::BadSeries("delta must be at least 1 tick"));
         }
-        if !f.iter().all(|c| c.is_ascii_digit()) {
-            return Err(Error::BadNumber("non-digit in fraction"));
-        }
-        if f.contains(&b'.') {
-            return Err(Error::BadNumber("more than one decimal point"));
-        }
+        cum = cum.checked_add(delta as u32).filter(|&c| c < TICKS_PER_EPOCH).ok_or(
+            Error::BadSeries("reading's instant crosses the epoch boundary"),
+        )?;
+        let value = i16::from_be_bytes([entry[2], entry[3]]);
+        readings.push((cum, value));
     }
-    // Reject -0 and -0.000: negative zero has no canonical use here.
-    if neg && int == b"0" && frac.is_none_or(|f| f.iter().all(|&c| c == b'0')) {
-        return Err(Error::BadNumber("negative zero"));
-    }
-    Ok(())
+    Ok((scale, readings))
 }
 
 impl std::fmt::Display for Error {
@@ -782,14 +825,50 @@ mod tests {
 
     #[test]
     fn number_grammar() {
-        for ok in ["0", "5", "23.5", "23.50", "-12.75", "1013.25", "0.5", "-0.5"] {
-            assert!(validate_number(ok.as_bytes()).is_ok(), "{ok} should be valid");
+        // scale at both ends of the defined range, mantissa at both ends of
+        // i16 and at zero (PROTOCOL.md 6.3, 6.3.1).
+        for scale in [SCALE_MIN, SCALE_MAX] {
+            for mantissa in [0i16, i16::MIN, i16::MAX] {
+                let mut p = vec![scale];
+                p.extend_from_slice(&mantissa.to_be_bytes());
+                assert_eq!(validate_number(&p), Ok((scale, mantissa)), "{p:?}");
+            }
         }
-        for bad in ["", "23.", ".5", "007", "-0", "-0.0", "+1", "1e3", "1.2.3", "-", "1 2", "1,5"] {
-            assert!(validate_number(bad.as_bytes()).is_err(), "{bad} should be invalid");
+        // scale 0x00 and 0x08 are both invalid, one below and one above the
+        // defined range.
+        for bad_scale in [0x00u8, 0x08] {
+            let p = [bad_scale, 0x00, 0x01];
+            assert!(validate_number(&p).is_err(), "scale {bad_scale:#04x} should be invalid");
         }
-        assert!(validate_number(&[b'1'; 32]).is_ok());
-        assert!(validate_number(&[b'1'; 33]).is_err());
+        // Only exactly 3 bytes is legal.
+        assert!(validate_number(&[0x02, 0x00]).is_err(), "2 bytes should be invalid");
+        assert!(validate_number(&[0x02, 0x00, 0x01, 0x00]).is_err(), "4 bytes should be invalid");
+    }
+
+    #[test]
+    fn series_grammar() {
+        let anchor = 1000u32;
+
+        // Two readings is the minimum, and the second's instant is anchor+delta.
+        let p = [0x02, 0x00, 0x0A, 0x00, 0x05, 0x00, 0x14];
+        assert_eq!(
+            validate_series(&p, anchor),
+            Ok((0x02, vec![(anchor, 10), (anchor + 5, 20)]))
+        );
+
+        // A single reading (no trailing entries) is invalid: use NUMBER instead.
+        assert!(validate_series(&[0x02, 0x00, 0x0A], anchor).is_err());
+        // Misaligned trailer.
+        assert!(validate_series(&[0x02, 0x00, 0x0A, 0x00, 0x01, 0x00], anchor).is_err());
+        // delta = 0 is invalid: readings must strictly increase.
+        assert!(validate_series(&[0x02, 0x00, 0x0A, 0x00, 0x00, 0x00, 0x05], anchor).is_err());
+        // A cumulative offset reaching TICKS_PER_EPOCH must be rejected.
+        let near_end = TICKS_PER_EPOCH - 3;
+        let delta = 5u16.to_be_bytes();
+        let p = [0x02, 0x00, 0x0A, delta[0], delta[1], 0x00, 0x05];
+        assert!(validate_series(&p, near_end).is_err());
+        // scale 0x00 is invalid here too.
+        assert!(validate_series(&[0x00, 0x00, 0x0A, 0x00, 0x05, 0x00, 0x14], anchor).is_err());
     }
 
     #[test]
@@ -803,6 +882,8 @@ mod tests {
         assert_eq!(MsgType::from_u8(0x14), Some(MsgType::CapabilityAdvertise));
         assert!(MsgType::Message.is_record_framed());
         assert!(!MsgType::Number.is_record_framed());
+        assert!(!MsgType::Series.is_record_framed());
+        assert_eq!(MsgType::from_u8(0x05), Some(MsgType::Series));
         assert!(!is_vendor(MsgType::Message as u8));
         assert!(is_vendor(0x09));
         assert!(is_control(0x18) && is_vendor(0x18));

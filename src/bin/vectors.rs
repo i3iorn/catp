@@ -52,25 +52,33 @@ fn main() {
     for cipher in [CipherId::HmacSha256T64, CipherId::HmacSha256T32] {
         let tag = cipher.tag_len();
         accept(
-            &format!("NUMBER, positive float, tag{tag}"),
+            &format!("NUMBER, positive, scale 0x02, tag{tag}"),
             &s,
             epoch,
             n2c,
-            &Datagram::number(cipher, id, epoch, 4096, "23.5").unwrap(),
+            &Datagram::number(cipher, id, epoch, 4096, 0x02, 2350).unwrap(),
         );
         accept(
-            &format!("NUMBER, negative, tag{tag}"),
+            &format!("NUMBER, negative, scale 0x02, tag{tag}"),
             &s,
             epoch,
             n2c,
-            &Datagram::number(cipher, id, epoch, 4097, "-0.25").unwrap(),
+            &Datagram::number(cipher, id, epoch, 4097, 0x02, -25).unwrap(),
         );
         accept(
-            &format!("NUMBER, zero, tag{tag}"),
+            &format!("NUMBER, zero, scale 0x01, tag{tag}"),
             &s,
             epoch,
             n2c,
-            &Datagram::number(cipher, id, epoch, 0, "0").unwrap(),
+            &Datagram::number(cipher, id, epoch, 0, 0x01, 0).unwrap(),
+        );
+        accept(
+            &format!("SERIES, three readings, tag{tag}"),
+            &s,
+            epoch,
+            n2c,
+            &Datagram::series(cipher, id, epoch, 0x02, &[(4200, 2350), (4450, 2360), (4900, 2355)])
+                .unwrap(),
         );
         accept(
             &format!("MESSAGE, single record, tag{tag}"),
@@ -187,21 +195,21 @@ fn main() {
         &s,
         epoch,
         n2c,
-        &Datagram::number(CipherId::HmacSha256T32, id, epoch, 0, "1").unwrap(),
+        &Datagram::number(CipherId::HmacSha256T32, id, epoch, 0, SCALE_MIN, 10).unwrap(),
     );
     accept(
         "boundary: offset 524287, last tick of the epoch",
         &s,
         epoch,
         n2c,
-        &Datagram::number(CipherId::HmacSha256T32, id, epoch, TICKS_PER_EPOCH - 1, "1").unwrap(),
+        &Datagram::number(CipherId::HmacSha256T32, id, epoch, TICKS_PER_EPOCH - 1, SCALE_MIN, 10).unwrap(),
     );
     accept(
         "boundary: offset 65536, first value past a 16-bit read",
         &s,
         epoch,
         n2c,
-        &Datagram::number(CipherId::HmacSha256T32, id, epoch, 65_536, "1").unwrap(),
+        &Datagram::number(CipherId::HmacSha256T32, id, epoch, 65_536, SCALE_MIN, 10).unwrap(),
     );
     accept(
         "boundary: size 1",
@@ -234,11 +242,32 @@ fn main() {
         .unwrap(),
     );
     accept(
-        "boundary: 32-byte NUMBER literal",
+        "boundary: NUMBER scale 0x01 (coarsest), mantissa i16::MAX",
         &s,
         epoch,
         n2c,
-        &Datagram::number(CipherId::HmacSha256T32, id, epoch, 3, "1.0000000000000000000000000000")
+        &Datagram::number(CipherId::HmacSha256T32, id, epoch, 3, SCALE_MIN, i16::MAX).unwrap(),
+    );
+    accept(
+        "boundary: NUMBER scale 0x07 (finest), mantissa i16::MIN",
+        &s,
+        epoch,
+        n2c,
+        &Datagram::number(CipherId::HmacSha256T32, id, epoch, 4, SCALE_MAX, i16::MIN).unwrap(),
+    );
+    accept(
+        "boundary: SERIES delta at 1 tick, the minimum",
+        &s,
+        epoch,
+        n2c,
+        &Datagram::series(CipherId::HmacSha256T32, id, epoch, SCALE_MIN, &[(5, 0), (6, 1)]).unwrap(),
+    );
+    accept(
+        "boundary: SERIES delta at 65535 ticks, the maximum",
+        &s,
+        epoch,
+        n2c,
+        &Datagram::series(CipherId::HmacSha256T32, id, epoch, SCALE_MIN, &[(6, 0), (6 + 65_535, 1)])
             .unwrap(),
     );
     accept(
@@ -247,7 +276,7 @@ fn main() {
         epoch,
         n2c,
         &{
-            let mut d = Datagram::number(CipherId::HmacSha256T32, id, epoch, 4, "1").unwrap();
+            let mut d = Datagram::number(CipherId::HmacSha256T32, id, epoch, 8, SCALE_MIN, 10).unwrap();
             d.reserved = 0x1F;
             d
         },
@@ -278,16 +307,23 @@ fn main() {
     println!("wire_len     {}", wire.len());
     println!();
 
-    // --- rejected NUMBER literals (PROTOCOL.md 6.3) ---
-    println!("# Rejected NUMBER literals: every one MUST fail the grammar of 6.3");
-    for bad in [
-        "", "23.", ".5", "007", "-0", "-0.0", "+1", "1e3", "1.2.3", "-", "1 2", "1,5", "0x1f",
-    ] {
-        println!("reject_number {}", if bad.is_empty() { "<empty>" } else { bad });
+    // --- NUMBER payloads (PROTOCOL.md 6.3, 6.3.1) ---
+    // scale at both ends of the defined range, mantissa at both ends of i16
+    // and at zero.
+    println!("# Accepted NUMBER payloads: scale 0x01/0x07, mantissa 0/MIN/MAX");
+    for scale in [SCALE_MIN, SCALE_MAX] {
+        for mantissa in [0i16, i16::MIN, i16::MAX] {
+            let mut p = vec![scale];
+            p.extend_from_slice(&mantissa.to_be_bytes());
+            println!("accept_number {}", hex(&p));
+        }
     }
     println!();
-    println!("# Accepted NUMBER literals");
-    for ok in ["0", "5", "23.5", "23.50", "-12.75", "1013.25", "0.5", "-0.5"] {
-        println!("accept_number {ok}");
-    }
+    println!("# Rejected NUMBER payloads: every one MUST fail 6.3's fixed layout");
+    // scale 0x00 and 0x08 bracket the defined 0x01..=0x07 range.
+    println!("reject_number {}", hex(&[0x00, 0x00, 0x01]));
+    println!("reject_number {}", hex(&[0x08, 0x00, 0x01]));
+    // Wrong length: shorter and longer than the fixed 3 bytes.
+    println!("reject_number {}", hex(&[0x02, 0x00]));
+    println!("reject_number {}", hex(&[0x02, 0x00, 0x01, 0x00]));
 }
