@@ -1,0 +1,36 @@
+# cargo-deny configuration (issue #39). Run with `cargo deny check`.
+#
+# Scope: this checks the dependency *tree* -- advisories, licences, and
+# duplicate/banned crates. It does not replace reading the RustCrypto
+# dependency policy in docs/DEPLOYMENT.md, which covers the "why" behind the
+# choices below.
+
+[graph]
+all-features = true
+
+[advisories]
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+ignore = []
+
+[licenses]
+# Kept to exactly what the current tree uses (verified with `cargo deny
+# check`); widen deliberately if a new dependency needs it, per
+# docs/DEPENDENCIES.md's "new dependencies need justification".
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-3-Clause",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+deny = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

@@ -35,6 +35,7 @@ If your telemetry content is itself sensitive, CATP is the wrong protocol. See
 | [`docs/RATIONALE.md`](docs/RATIONALE.md) | Non-normative. Why the less obvious rules are the way they are. |
 | [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) | Non-normative. Choosing the things the specification deliberately leaves open. |
 | [`docs/test-vectors.txt`](docs/test-vectors.txt) | Frozen conformance vectors (§14.1). The authority a second implementation checks itself against. |
+| [`docs/DEPENDENCIES.md`](docs/DEPENDENCIES.md) | Non-normative. Dependency policy: what a version bump requires, supply-chain tooling. |
 | [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) | Non-normative. The attacker capabilities Section 12's claims assume. |
 | [`SECURITY.md`](SECURITY.md) | How to report a vulnerability, and what's a documented non-goal rather than one. |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Ground rules, especially for a second implementation. |
