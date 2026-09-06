@@ -329,3 +329,39 @@ batching in the first place.
 
 ---
 
+## R13. Why `cipher_id` 0x02 truncates `epoch_key` rather than re-deriving
+
+Justifies [PROTOCOL.md](PROTOCOL.md) §7.2.
+
+`epoch_key` is a fixed 32 bytes regardless of which suite consumes it (§9.2),
+but SipHash-2-4's native key is 128 bits, not 256. Two ways to close that gap:
+truncate `epoch_key` to its first 16 bytes, or call HKDF-Expand a second time
+with a 16-byte output length specific to `0x02`.
+
+Truncation is what the specification requires, for two reasons:
+
+1. **It costs nothing extra to verify.** `epoch_key` is already computed once
+   per datagram today (`docs/DEPLOYMENT.md` D2 notes caching it per epoch as
+   unimplemented future headroom); slicing its first 16 bytes is free either
+   way. A second HKDF-Expand call is a second HMAC computation,
+   doubling the per-datagram key-derivation cost for `0x02` specifically --
+   the one suite this protocol offers *because* a sender finds SHA-256
+   disproportionately expensive (§8.1.1). Making that sender's cheap cipher
+   secretly require two HMAC-SHA256 computations to key would defeat the
+   point of offering it.
+2. **It is not a novel construction.** HKDF-Expand's output for a given
+   `(PRK, info)` pair is indistinguishable from random up to its requested
+   length; the first 16 bytes of a 32-byte pseudorandom string are
+   themselves 16 bytes of pseudorandom output. This is the same "take a
+   prefix of a longer derived key" pattern used throughout key-derivation
+   practice (e.g. HKDF's own multi-key-from-one-`okm` usage), not something
+   specific to this protocol that would need its own security argument.
+
+The MUST NOT on using the remaining 16 bytes for anything exists so that a
+future suite added at this cipher width can't accidentally end up keyed with
+material `0x02` has already exposed the derivation of (via its tag, to anyone
+who could break SipHash-2-4) -- there is currently no such suite, but the
+prohibition is cheap and forecloses the question.
+
+---
+

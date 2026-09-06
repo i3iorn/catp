@@ -4,10 +4,11 @@
 //! 3-byte record framing, the fixed-point `NUMBER`/`SERIES` codec, HKDF epoch
 //! keys, and offset-keyed replay protection.
 //!
-//! Cipher suites `0x01` (HMAC-SHA256-t64) and `0x04` (HMAC-SHA256-t32) are
-//! implemented. `0x02` (SipHash) and `0x03` (ChaCha20-Poly1305) are registered
-//! in [`CipherId`] but return [`Error::CipherUnimplemented`], so the framing and
-//! key-schedule paths stay honest about what has actually been exercised.
+//! Cipher suites `0x01` (HMAC-SHA256-t64), `0x02` (SipHash-2-4), and `0x04`
+//! (HMAC-SHA256-t32) are implemented. `0x03` (ChaCha20-Poly1305) is
+//! registered in [`CipherId`] but returns [`Error::CipherUnimplemented`], so
+//! the framing and key-schedule paths stay honest about what has actually
+//! been exercised.
 
 #![forbid(unsafe_code)]
 
@@ -16,6 +17,7 @@ use hkdf::Hkdf;
 use hmac::digest::KeyInit;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
+use siphasher::sip::SipHasher24;
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
@@ -114,7 +116,7 @@ impl CipherId {
     }
     /// True for suites this reference implementation can actually compute.
     pub fn implemented(self) -> bool {
-        matches!(self, Self::HmacSha256T64 | Self::HmacSha256T32)
+        matches!(self, Self::HmacSha256T64 | Self::HmacSha256T32 | Self::SipHash24)
     }
 
     /// Whether a receiver accepting this suite MUST enforce a per-`sender_id`
@@ -406,11 +408,25 @@ pub fn mac(cipher: CipherId, key: &[u8; 32], msg: &[u8]) -> Result<Vec<u8>, Erro
     if !cipher.implemented() {
         return Err(Error::CipherUnimplemented(cipher as u8));
     }
-    let mut m = <Hmac<Sha256> as KeyInit>::new_from_slice(key)
-        .expect("HMAC accepts any key length");
-    m.update(msg);
-    let full = m.finalize().into_bytes();
-    Ok(full[..cipher.tag_len()].to_vec())
+    match cipher {
+        CipherId::HmacSha256T64 | CipherId::HmacSha256T32 => {
+            let mut m = <Hmac<Sha256> as KeyInit>::new_from_slice(key)
+                .expect("HMAC accepts any key length");
+            m.update(msg);
+            let full = m.finalize().into_bytes();
+            Ok(full[..cipher.tag_len()].to_vec())
+        }
+        // PROTOCOL.md 7.2: SipHash-2-4's native key is 128 bits, so it uses
+        // only the first 16 bytes of the 32-byte epoch_key (RATIONALE.md
+        // R13). Its output is already 8 bytes -- the truncate() in 7.2's
+        // formula is a no-op for this suite, not a second step.
+        CipherId::SipHash24 => {
+            let sip_key: [u8; 16] = key[..16].try_into().expect("key is 32 bytes");
+            let tag = SipHasher24::new_with_key(&sip_key).hash(msg);
+            Ok(tag.to_be_bytes().to_vec())
+        }
+        CipherId::ChaCha20Poly1305 => unreachable!("excluded by cipher.implemented() above"),
+    }
 }
 
 /// Constant-time comparison (PROTOCOL.md 7.4: "Tag comparison MUST be
@@ -745,11 +761,34 @@ mod tests {
         let k = [0u8; 32];
         assert!(mac(CipherId::HmacSha256T64, &k, b"x").is_ok());
         assert!(mac(CipherId::HmacSha256T32, &k, b"x").is_ok());
-        assert_eq!(mac(CipherId::SipHash24, &k, b"x"), Err(Error::CipherUnimplemented(0x02)));
+        assert!(mac(CipherId::SipHash24, &k, b"x").is_ok());
         assert_eq!(
             mac(CipherId::ChaCha20Poly1305, &k, b"x"),
             Err(Error::CipherUnimplemented(0x03))
         );
+    }
+
+    /// PROTOCOL.md 7.2: SipHash-2-4 uses only the first 16 bytes of
+    /// epoch_key. Changing the last 16 bytes MUST NOT change the tag.
+    #[test]
+    fn siphash_ignores_the_second_half_of_epoch_key() {
+        let mut k1 = [0x11u8; 32];
+        let mut k2 = k1;
+        k2[16] ^= 0xFF; // flip a bit in the unused half
+        assert_ne!(k1, k2);
+        assert_eq!(mac(CipherId::SipHash24, &k1, b"x").unwrap(), mac(CipherId::SipHash24, &k2, b"x").unwrap());
+
+        // But the first half is load-bearing: flipping it changes the tag.
+        k1[0] ^= 0xFF;
+        assert_ne!(mac(CipherId::SipHash24, &k1, b"x").unwrap(), mac(CipherId::SipHash24, &k2, b"x").unwrap());
+    }
+
+    /// SipHash-2-4's output is 8 bytes with no truncation needed, unlike
+    /// HmacSha256T64's (32-byte HMAC output truncated to 8).
+    #[test]
+    fn siphash_tag_is_eight_bytes_untruncated() {
+        let k = [0x22u8; 32];
+        assert_eq!(mac(CipherId::SipHash24, &k, b"hello").unwrap().len(), 8);
     }
 
     #[test]

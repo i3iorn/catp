@@ -1041,7 +1041,17 @@ tag   = ChaCha20-Poly1305-Seal(
 The plaintext is empty, so the construction produces no ciphertext and CATP
 remains a plaintext protocol; only the 16-byte Poly1305 tag is transmitted.
 
-`epoch_key` is derived per Section 9.2.
+`epoch_key` is derived per Section 9.2 and is always 32 bytes. `cipher_id`
+`0x01` (HMAC-SHA256) and `0x03` (ChaCha20-Poly1305) both accept a 256-bit key
+directly. `cipher_id` `0x02` (SipHash-2-4) does not: its native key is 128
+bits. Implementations MUST use the first 16 bytes of `epoch_key` as the
+SipHash-2-4 key and MUST NOT use the remaining 16 bytes for anything. See
+[RATIONALE.md](RATIONALE.md) R13 for why truncation is the resolution here
+rather than a second HKDF-Expand call.
+
+SipHash-2-4 outputs a 64-bit value with no byte order of its own; this
+specification transmits it big-endian, consistent with every other
+multi-byte field CATP defines.
 
 **Implementers of `cipher_id` `0x03` should read [RATIONALE.md](RATIONALE.md)
 R5 before changing anything above.** Poly1305 is a one-time authenticator: two
