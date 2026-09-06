@@ -35,6 +35,9 @@ If your telemetry content is itself sensitive, CATP is the wrong protocol. See
 | [`docs/RATIONALE.md`](docs/RATIONALE.md) | Non-normative. Why the less obvious rules are the way they are. |
 | [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) | Non-normative. Choosing the things the specification deliberately leaves open. |
 | [`docs/test-vectors.txt`](docs/test-vectors.txt) | Frozen conformance vectors (§14.1). The authority a second implementation checks itself against. |
+| [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) | Non-normative. The attacker capabilities Section 12's claims assume. |
+| [`SECURITY.md`](SECURITY.md) | How to report a vulnerability, and what's a documented non-goal rather than one. |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Ground rules, especially for a second implementation. |
 
 ## Reference implementation
 
@@ -111,9 +114,12 @@ cargo run --bin catp-vectors > docs/test-vectors.txt
 
 The most useful contribution is a **second implementation in another language**,
 validated against `docs/test-vectors.txt`. A specification exercised by one
-implementation has undiscovered ambiguities by default.
+implementation has undiscovered ambiguities by default. See
+[`CONTRIBUTING.md`](CONTRIBUTING.md) for the ground rules — in particular,
+implement from the specification, not from `src/`.
 
-Open issues are tracked on GitHub.
+Open issues are tracked on GitHub. Found a vulnerability? See
+[`SECURITY.md`](SECURITY.md) rather than filing a public issue.
 
 ## Licence
 
