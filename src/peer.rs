@@ -5,10 +5,114 @@
 //! - [`Collector`] is a multi-peer registry: one MAC computation per datagram
 //!   regardless of fleet size (PROTOCOL.md 12.5).
 //! - [`NodeClock`] is the cold-start state machine of PROTOCOL.md 11.4.
+//! - [`Stats`] is the discard-counter snapshot both `PeerState` and
+//!   `Collector` expose, categorized by the Section 7.4 step that would
+//!   have rejected the datagram (Section 6.8).
 
 use crate::wire::{decode, Accepted, PeerConfig};
 use crate::*;
 use std::collections::HashMap;
+
+/// Discard counters, categorized by the PROTOCOL.md 7.4 step that would have
+/// rejected the datagram. Section 6.8's whole design is that a failure is
+/// "silent discard on the wire; counted locally" -- this is that count,
+/// defined once by the library instead of rebuilt differently by every
+/// caller.
+///
+/// A count here is not itself authenticated: everything through `auth_failed`
+/// happens before or at step 7, so an attacker who cannot forge a MAC can
+/// still inflate these counters by sending junk. That is expected -- it is
+/// exactly the traffic Section 12.5 bounds the *cost* of, not traffic these
+/// counters claim is genuine.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Stats {
+    /// Datagrams that passed every check and were handed back as [`Accepted`].
+    pub accepted: u64,
+    /// Step 1: shorter than `header_len + tag_len`.
+    pub too_short: u64,
+    /// Step 2: unsupported `version`.
+    pub unsupported_version: u64,
+    /// Step 3: `msg_type` is `0x00` or not implemented.
+    pub bad_msg_type: u64,
+    /// Step 4: `sender_id` is not provisioned. Only ever recorded by
+    /// [`Collector`] -- a [`PeerState`] is already resolved to one sender and
+    /// is never reached for an unknown one.
+    pub unknown_sender: u64,
+    /// Step 5: `cipher_id` does not match the suite configured for this
+    /// sender.
+    pub cipher_mismatch: u64,
+    /// Step 6: `epoch_low` did not reconstruct to an `epoch_id` within the
+    /// acceptance window.
+    pub epoch_out_of_window: u64,
+    /// Step 7: the MAC did not verify.
+    pub auth_failed: u64,
+    /// Step 8: `datagram_offset` failed the replay check.
+    pub replay: u64,
+    /// Step 9: the payload did not frame cleanly -- into records, against
+    /// `NUMBER`/`SERIES`'s fixed layout, or against a control type's layout.
+    pub framing: u64,
+    /// Authenticated and not a replay, but discarded for exceeding the
+    /// configured inbound rate limit (Section 10.3, 8.1.1) -- counted rather
+    /// than silently absorbed, per Section 10.3's own wording.
+    pub rate_limited: u64,
+    /// Step 10, aggregated across every accepted datagram: records skipped
+    /// for a `(format, schema_version)` pair this receiver holds no
+    /// definition for. [`Accepted::skipped`] carries this per call; this is
+    /// the running total.
+    pub skipped_records: u64,
+}
+
+impl Stats {
+    fn record_result(&mut self, result: &Result<Accepted, Error>) {
+        match result {
+            Ok(acc) => {
+                self.accepted += 1;
+                self.skipped_records += acc.skipped.len() as u64;
+            }
+            Err(e) => self.record_error(e),
+        }
+    }
+
+    fn record_error(&mut self, e: &Error) {
+        match e {
+            Error::TooShort => self.too_short += 1,
+            Error::UnsupportedVersion(_) => self.unsupported_version += 1,
+            Error::BadMsgType(_) => self.bad_msg_type += 1,
+            Error::UnknownSender(_) => self.unknown_sender += 1,
+            Error::CipherMismatch { .. } => self.cipher_mismatch += 1,
+            Error::EpochOutOfWindow => self.epoch_out_of_window += 1,
+            Error::AuthFailed => self.auth_failed += 1,
+            Error::Replay => self.replay += 1,
+            Error::Framing(_) | Error::BadNumber(_) | Error::BadSeries(_) | Error::BodyTooLarge(_) => {
+                self.framing += 1
+            }
+            Error::RateLimited => self.rate_limited += 1,
+            // Everything else (CipherUnimplemented, Oversize, OffsetReuse,
+            // EpochRollback, TimeRollback, ClockAlreadyValid, NoClock,
+            // CipherRequiresRateLimit) is a sender-side or construction-time
+            // error that `PeerState::accept`/`Collector::accept` never
+            // return, so it never reaches this receive-path counter.
+            _ => {}
+        }
+    }
+
+    /// Fold another snapshot into this one. [`Collector::stats`] uses this to
+    /// aggregate across every provisioned peer.
+    pub fn merge(&mut self, other: &Stats) {
+        self.accepted += other.accepted;
+        self.too_short += other.too_short;
+        self.unsupported_version += other.unsupported_version;
+        self.bad_msg_type += other.bad_msg_type;
+        self.unknown_sender += other.unknown_sender;
+        self.cipher_mismatch += other.cipher_mismatch;
+        self.epoch_out_of_window += other.epoch_out_of_window;
+        self.auth_failed += other.auth_failed;
+        self.replay += other.replay;
+        self.framing += other.framing;
+        self.rate_limited += other.rate_limited;
+        self.skipped_records += other.skipped_records;
+    }
+}
 
 /// Per-sender receiver state.
 pub struct PeerState {
@@ -21,9 +125,7 @@ pub struct PeerState {
     /// `None` unless `config.inbound_rate_limit` was set; see
     /// [`CipherId::requires_inbound_rate_limit`] for when it must be.
     limiter: Option<InboundLimiter>,
-    /// Datagrams that authenticated and passed replay but were discarded for
-    /// budget (PROTOCOL.md 10.3: "counted rather than silently absorbed").
-    rate_limited: u64,
+    stats: Stats,
 }
 
 impl PeerState {
@@ -51,7 +153,7 @@ impl PeerState {
             window_entries: entries,
             highest_epoch_announced: None,
             limiter,
-            rate_limited: 0,
+            stats: Stats::default(),
         })
     }
 
@@ -69,6 +171,18 @@ impl PeerState {
     /// replay-checked the datagram -- see [`InboundLimiter`] for why that
     /// ordering is load-bearing, not incidental.
     pub fn accept(
+        &mut self,
+        buf: &[u8],
+        local_epoch: u32,
+        dir: Direction,
+        now_ms: u64,
+    ) -> Result<Accepted, Error> {
+        let result = self.accept_inner(buf, local_epoch, dir, now_ms);
+        self.stats.record_result(&result);
+        result
+    }
+
+    fn accept_inner(
         &mut self,
         buf: &[u8],
         local_epoch: u32,
@@ -93,7 +207,6 @@ impl PeerState {
         if let Some(limiter) = &mut self.limiter
             && !limiter.try_acquire(now_ms)
         {
-            self.rate_limited += 1;
             return Err(Error::RateLimited);
         }
         Ok(accepted)
@@ -102,7 +215,13 @@ impl PeerState {
     /// Datagrams discarded for exceeding the inbound rate limit, after
     /// authenticating successfully (PROTOCOL.md 10.3).
     pub fn rate_limited_count(&self) -> u64 {
-        self.rate_limited
+        self.stats.rate_limited
+    }
+
+    /// Discard counters for this one sender (PROTOCOL.md 6.8, 7.4). See
+    /// [`Stats`].
+    pub fn stats(&self) -> Stats {
+        self.stats
     }
 
     /// Apply an `EPOCH_ANNOUNCE` that has already been authenticated.
@@ -133,6 +252,9 @@ impl PeerState {
 /// A collector serving many senders.
 pub struct Collector {
     peers: HashMap<u32, PeerState>,
+    /// Only ever holds `too_short` and `unknown_sender`: both are decided
+    /// before a peer is even looked up, so they can't live on a `PeerState`.
+    own_stats: Stats,
 }
 
 impl Default for Collector {
@@ -143,7 +265,7 @@ impl Default for Collector {
 
 impl Collector {
     pub fn new() -> Self {
-        Self { peers: HashMap::new() }
+        Self { peers: HashMap::new(), own_stats: Stats::default() }
     }
 
     /// Provision a peer. PROTOCOL.md 12.5 requires state to be allocated here,
@@ -175,11 +297,29 @@ impl Collector {
         now_ms: u64,
     ) -> Result<Accepted, Error> {
         if buf.len() < HEADER_LEN {
+            self.own_stats.too_short += 1;
             return Err(Error::TooShort);
         }
         let sender_id = u32::from_be_bytes([buf[5], buf[6], buf[7], buf[8]]);
-        let peer = self.peers.get_mut(&sender_id).ok_or(Error::UnknownSender(sender_id))?;
+        let peer = match self.peers.get_mut(&sender_id) {
+            Some(p) => p,
+            None => {
+                self.own_stats.unknown_sender += 1;
+                return Err(Error::UnknownSender(sender_id));
+            }
+        };
         peer.accept(buf, local_epoch, dir, now_ms)
+    }
+
+    /// Discard counters aggregated across every provisioned peer, plus the
+    /// `too_short`/`unknown_sender` discards that never reach a peer at all
+    /// (PROTOCOL.md 6.8, 7.4). See [`Stats`].
+    pub fn stats(&self) -> Stats {
+        let mut total = self.own_stats;
+        for peer in self.peers.values() {
+            total.merge(&peer.stats());
+        }
+        total
     }
 }
 
@@ -540,5 +680,151 @@ mod tests {
         // Damage is bounded: the node is in a stale epoch (a DoS against
         // itself), but no epoch below its persisted floor.
         assert!(clk.now(0).unwrap() > floor);
+    }
+
+    // ------------------------------------------------------------- Stats (#36)
+
+    #[test]
+    fn accepted_and_skipped_records_are_counted() {
+        let secret = DeviceSecret::new([1u8; 32]);
+        let mut st = PeerState::new(PeerConfig {
+            sender_id: 1,
+            secret: secret.clone(),
+            cipher: CipherId::HmacSha256T32,
+            // Holds only v1; the datagram below carries v1 and v2 records, so
+            // the v2 one must be skipped, not rejected (PROTOCOL.md 6.4.4).
+            layouts: vec![(Format::None as u8, 1)],
+            inbound_rate_limit: Some(RateLimit::RECOMMENDED_DEFAULT),
+        })
+        .unwrap();
+        let e = 3000u32;
+        let dg = Datagram::data(
+            MsgType::Message,
+            CipherId::HmacSha256T32,
+            1,
+            e,
+            10,
+            vec![Record::new(Format::None, 1, vec![0x01]), Record::new(Format::None, 2, vec![0x02])],
+        )
+        .unwrap();
+        let w = dg.encode(&secret, e, Direction::NodeToCollector, MAX_DATAGRAM_IPV4).unwrap();
+        st.accept(&w, e, Direction::NodeToCollector, 0).unwrap();
+
+        let s = st.stats();
+        assert_eq!(s.accepted, 1);
+        assert_eq!(s.skipped_records, 1);
+    }
+
+    #[test]
+    fn auth_failed_and_replay_are_counted_by_step() {
+        let secret = DeviceSecret::new([1u8; 32]);
+        let mut st = PeerState::new(PeerConfig {
+            sender_id: 1,
+            secret: secret.clone(),
+            cipher: CipherId::HmacSha256T32,
+            layouts: vec![(Format::None as u8, 1)],
+            inbound_rate_limit: Some(RateLimit::RECOMMENDED_DEFAULT),
+        })
+        .unwrap();
+        let e = 4000u32;
+
+        // A bit-flip after encoding fails the MAC: step 7.
+        let mut tampered =
+            Datagram::number(CipherId::HmacSha256T32, 1, e, 10, 1, 5).unwrap().encode(
+                &secret,
+                e,
+                Direction::NodeToCollector,
+                MAX_DATAGRAM_IPV4,
+            ).unwrap();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 0x01;
+        assert_eq!(st.accept(&tampered, e, Direction::NodeToCollector, 0).unwrap_err(), Error::AuthFailed);
+
+        // The same datagram sent twice is a replay on the second delivery:
+        // step 8.
+        let w = Datagram::number(CipherId::HmacSha256T32, 1, e, 20, 1, 5)
+            .unwrap()
+            .encode(&secret, e, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
+            .unwrap();
+        st.accept(&w, e, Direction::NodeToCollector, 0).unwrap();
+        assert_eq!(st.accept(&w, e, Direction::NodeToCollector, 0).unwrap_err(), Error::Replay);
+
+        let s = st.stats();
+        assert_eq!(s.auth_failed, 1);
+        assert_eq!(s.replay, 1);
+        assert_eq!(s.accepted, 1);
+    }
+
+    #[test]
+    fn rate_limited_is_counted_alongside_the_step_categories() {
+        let secret = DeviceSecret::new([1u8; 32]);
+        let mut st = PeerState::new(PeerConfig {
+            sender_id: 1,
+            secret: secret.clone(),
+            cipher: CipherId::HmacSha256T32,
+            layouts: vec![(Format::None as u8, 1)],
+            inbound_rate_limit: Some(RateLimit { per_sec: 10, burst: 1 }),
+        })
+        .unwrap();
+        let e = 5000u32;
+        let send = |off: u32| {
+            Datagram::number(CipherId::HmacSha256T32, 1, e, off, 1, 5)
+                .unwrap()
+                .encode(&secret, e, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
+                .unwrap()
+        };
+        st.accept(&send(1), e, Direction::NodeToCollector, 0).unwrap();
+        assert_eq!(st.accept(&send(2), e, Direction::NodeToCollector, 0).unwrap_err(), Error::RateLimited);
+
+        let s = st.stats();
+        assert_eq!(s.rate_limited, 1);
+        assert_eq!(s.accepted, 1);
+        // rate_limited_count() is the same number, kept as a convenience
+        // accessor rather than a second source of truth.
+        assert_eq!(st.rate_limited_count(), 1);
+    }
+
+    #[test]
+    fn collector_counts_too_short_and_unknown_sender_before_reaching_a_peer() {
+        let mut c = Collector::new();
+        c.provision(cfg(1)).unwrap();
+        let e = 6000u32;
+
+        // Shorter than the header: never even resolves a sender_id.
+        assert_eq!(
+            c.accept(&[0u8; 3], e, Direction::NodeToCollector, 0).unwrap_err(),
+            Error::TooShort
+        );
+
+        // Long enough, but sender_id 2 was never provisioned.
+        let dg = Datagram::number(CipherId::HmacSha256T32, 2, e, 5, 1, 5).unwrap();
+        let w = dg
+            .encode(&DeviceSecret::new([2u8; 32]), e, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
+            .unwrap();
+        assert_eq!(c.accept(&w, e, Direction::NodeToCollector, 0).unwrap_err(), Error::UnknownSender(2));
+
+        let s = c.stats();
+        assert_eq!(s.too_short, 1);
+        assert_eq!(s.unknown_sender, 1);
+        // Neither discard ever reached provisioned peer 1's own counters.
+        assert_eq!(c.peer_mut(1).unwrap().stats().too_short, 0);
+    }
+
+    #[test]
+    fn collector_stats_aggregates_across_every_provisioned_peer() {
+        let mut c = Collector::new();
+        c.provision(cfg(1)).unwrap();
+        c.provision(cfg(2)).unwrap();
+        let e = 7000u32;
+
+        for id in [1u32, 2] {
+            let dg = Datagram::number(CipherId::HmacSha256T32, id, e, 9, 1, 5).unwrap();
+            let w = dg
+                .encode(&DeviceSecret::new([(id & 0xFF) as u8; 32]), e, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
+                .unwrap();
+            c.accept(&w, e, Direction::NodeToCollector, 0).unwrap();
+        }
+
+        assert_eq!(c.stats().accepted, 2);
     }
 }

@@ -39,18 +39,6 @@ fn at(epoch_id: u32, offset: u32) -> String {
     format!("t={secs}.{ms:03}")
 }
 
-#[derive(Default)]
-struct Stats {
-    accepted: u64,
-    auth_failed: u64,
-    replayed: u64,
-    framing: u64,
-    other: u64,
-    skipped_records: u64,
-    // PROTOCOL.md 10.3: "counted rather than silently absorbed."
-    rate_limited: u64,
-}
-
 fn label(mt: MsgType) -> &'static str {
     match mt {
         MsgType::Message => "MESSAGE",
@@ -173,94 +161,88 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         CIPHER as u8
     );
 
-    let mut stats = Stats::default();
     let mut buf = [0u8; 2048];
+    let mut printed = 0u64;
 
     loop {
         let (n, from) = sock.recv_from(&mut buf)?;
         let local_epoch = epoch_id_at(now_secs());
 
-        match collector.accept(&buf[..n], local_epoch, Direction::NodeToCollector, now_ms()) {
-            Ok(acc) => {
-                stats.accepted += 1;
-                stats.skipped_records += acc.skipped.len() as u64;
-                // Every record in the datagram shares this instant
-                // (PROTOCOL.md 6.4.1): the offset is a header field.
-                let when = at(acc.epoch_id, acc.datagram_offset);
+        // Discard silently on the wire otherwise; counted locally by
+        // Collector itself (PROTOCOL.md 6.8) -- see the periodic snapshot
+        // below.
+        if let Ok(acc) = collector.accept(&buf[..n], local_epoch, Direction::NodeToCollector, now_ms()) {
+            // Every record in the datagram shares this instant
+            // (PROTOCOL.md 6.4.1): the offset is a header field.
+            let when = at(acc.epoch_id, acc.datagram_offset);
 
-                // Dispatch on msg_type. A record-framed type, NUMBER, and
-                // SERIES are different shapes, and MESSAGE/EVENT/ALARM carry
-                // different handling obligations even though they frame
-                // identically.
-                match MsgType::from_u8(acc.datagram.msg_type) {
-                    Some(MsgType::Number) => match acc.datagram.number_value() {
-                        Some((scale, mantissa)) => {
-                            println!("{from}  {when}  NUMBER   {}", format_scaled(scale, mantissa));
-                        }
-                        None => println!("{from}  {when}  NUMBER   MALFORMED"),
-                    },
-                    Some(MsgType::Series) => match acc.datagram.series_values() {
-                        // Each reading keeps the instant it was actually
-                        // taken (PROTOCOL.md 6.9): a MESSAGE batch could not
-                        // print anything but `when` for every line.
-                        Some((scale, readings)) => {
-                            for (offset, mantissa) in readings {
-                                println!(
-                                    "{from}  {}  SERIES   {}",
-                                    at(acc.epoch_id, offset),
-                                    format_scaled(scale, mantissa)
-                                );
-                            }
-                        }
-                        None => println!("{from}  {when}  SERIES   MALFORMED"),
-                    },
-                    Some(mt @ (MsgType::Message | MsgType::Event | MsgType::Alarm)) => {
-                        for r in &acc.datagram.records {
-                            println!("{from}  {when}  {:<8} {}", label(mt), render(r));
+            // Dispatch on msg_type. A record-framed type, NUMBER, and
+            // SERIES are different shapes, and MESSAGE/EVENT/ALARM carry
+            // different handling obligations even though they frame
+            // identically.
+            match MsgType::from_u8(acc.datagram.msg_type) {
+                Some(MsgType::Number) => match acc.datagram.number_value() {
+                    Some((scale, mantissa)) => {
+                        println!("{from}  {when}  NUMBER   {}", format_scaled(scale, mantissa));
+                    }
+                    None => println!("{from}  {when}  NUMBER   MALFORMED"),
+                },
+                Some(MsgType::Series) => match acc.datagram.series_values() {
+                    // Each reading keeps the instant it was actually
+                    // taken (PROTOCOL.md 6.9): a MESSAGE batch could not
+                    // print anything but `when` for every line.
+                    Some((scale, readings)) => {
+                        for (offset, mantissa) in readings {
+                            println!(
+                                "{from}  {}  SERIES   {}",
+                                at(acc.epoch_id, offset),
+                                format_scaled(scale, mantissa)
+                            );
                         }
                     }
-                    Some(mt) => println!("{from}  {when}  {:<8} ({} bytes)", label(mt), acc.datagram.raw.len()),
-                    None => stats.other += 1,
+                    None => println!("{from}  {when}  SERIES   MALFORMED"),
+                },
+                Some(mt @ (MsgType::Message | MsgType::Event | MsgType::Alarm)) => {
+                    for r in &acc.datagram.records {
+                        println!("{from}  {when}  {:<8} {}", label(mt), render(r));
+                    }
                 }
-                for r in &acc.skipped {
-                    println!(
-                        "{from}  SKIP record format=0x{:02X} schema_version={} ({} bytes) \
-                         - no layout held",
-                        r.format,
-                        r.schema_version,
-                        r.body.len()
-                    );
-                }
+                Some(mt) => println!("{from}  {when}  {:<8} ({} bytes)", label(mt), acc.datagram.raw.len()),
+                // decode() already validated msg_type at step 3, so this
+                // is unreachable in practice; nothing to count beyond
+                // what collector.stats() already tracks.
+                None => {}
             }
-            // Discard silently on the wire; count locally (PROTOCOL.md 6.8).
-            Err(Error::AuthFailed) => stats.auth_failed += 1,
-            Err(Error::Replay) => stats.replayed += 1,
-            Err(Error::Framing(_)) | Err(Error::BadNumber(_)) => stats.framing += 1,
-            // Already authenticated and replay-checked; discarded for budget
-            // (PROTOCOL.md 10.3), not for authenticity.
-            Err(Error::RateLimited) => stats.rate_limited += 1,
-            Err(_) => stats.other += 1,
+            for r in &acc.skipped {
+                println!(
+                    "{from}  SKIP record format=0x{:02X} schema_version={} ({} bytes) \
+                     - no layout held",
+                    r.format,
+                    r.schema_version,
+                    r.body.len()
+                );
+            }
         }
 
-        if (stats.accepted
-            + stats.auth_failed
-            + stats.replayed
-            + stats.framing
-            + stats.other
-            + stats.rate_limited)
-            % 20
-            == 0
-        {
+        printed += 1;
+        if printed.is_multiple_of(20) {
+            let s = collector.stats();
             eprintln!(
-                "[stats] accepted={} auth_failed={} replayed={} framing={} other={} \
-                 rate_limited={} skipped_records={}",
-                stats.accepted,
-                stats.auth_failed,
-                stats.replayed,
-                stats.framing,
-                stats.other,
-                stats.rate_limited,
-                stats.skipped_records
+                "[stats] accepted={} too_short={} unsupported_version={} bad_msg_type={} \
+                 unknown_sender={} cipher_mismatch={} epoch_out_of_window={} auth_failed={} \
+                 replay={} framing={} rate_limited={} skipped_records={}",
+                s.accepted,
+                s.too_short,
+                s.unsupported_version,
+                s.bad_msg_type,
+                s.unknown_sender,
+                s.cipher_mismatch,
+                s.epoch_out_of_window,
+                s.auth_failed,
+                s.replay,
+                s.framing,
+                s.rate_limited,
+                s.skipped_records
             );
         }
     }
