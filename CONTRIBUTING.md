@@ -47,11 +47,15 @@ touches the codec, wire format, or vector-generation logic in any way:
 cargo run --bin catp-vectors > docs/test-vectors.txt
 ```
 
+This also regenerates `docs/test-vectors.json`, a machine-readable mirror
+(issue #35) written directly by the same binary from the same call sites —
+commit both together; `tests/vectors.rs` checks they agree. Regenerate
+deliberately and commit both alongside your code change in the same PR.
+
 `docs/CONFORMANCE.md` maps every §14.2 required adversarial test to the test
 that discharges it — a second implementation should check its own suite
 against that table rather than re-deriving a checklist from §14.2's prose.
 
-and commit the regenerated file alongside your code change in the same PR.
 `tests/vectors.rs` will fail otherwise, deliberately — that's the test
 catching wire-format drift, not a bug in the test.
 
