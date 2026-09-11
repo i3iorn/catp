@@ -374,6 +374,7 @@ fn main() {
     // confirming distinct nonces produce distinct tags under one epoch_key
     // (PROTOCOL.md 14.1, 14.2; RATIONALE.md R5) ---
     accept(
+        &mut json,
         "cipher 0x03: nonce pair, offset 10",
         &s,
         epoch,
@@ -381,6 +382,7 @@ fn main() {
         &Datagram::number(CipherId::ChaCha20Poly1305, id, epoch, 10, SCALE_MIN, 10).unwrap(),
     );
     accept(
+        &mut json,
         "cipher 0x03: nonce pair, offset 11 (same epoch_key, distinct nonce)",
         &s,
         epoch,
