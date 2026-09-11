@@ -36,6 +36,7 @@ If your telemetry content is itself sensitive, CATP is the wrong protocol. See
 | [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) | Non-normative. Choosing the things the specification deliberately leaves open. |
 | [`docs/test-vectors.txt`](docs/test-vectors.txt) | Frozen conformance vectors (§14.1). The authority a second implementation checks itself against. |
 | [`docs/test-vectors.json`](docs/test-vectors.json) | The same vectors, machine-readable. Generated from the same call sites as the text file, so they cannot drift. |
+| [`docs/CONFORMANCE.md`](docs/CONFORMANCE.md) | Non-normative. Maps each §14.2 required adversarial test to the test that discharges it. |
 | [`docs/DEPENDENCIES.md`](docs/DEPENDENCIES.md) | Non-normative. Dependency policy: what a version bump requires, supply-chain tooling. |
 | [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) | Non-normative. The attacker capabilities Section 12's claims assume. |
 | [`SECURITY.md`](SECURITY.md) | How to report a vulnerability, and what's a documented non-goal rather than one. |
@@ -43,11 +44,12 @@ If your telemetry content is itself sensitive, CATP is the wrong protocol. See
 
 ## Reference implementation
 
-Rust, `unsafe_code` forbidden crate-wide, five direct dependencies (`hmac`,
-`sha2`, `hkdf`, `subtle`, `zeroize`) — RustCrypto crates plus their
-constant-time and zeroizing-memory helpers, pulling in their usual transitive
-tree (`digest`, `crypto-common`, `typenum`, and the like). MSRV 1.88, tracked
-in `Cargo.toml`'s `rust-version` and tested in CI.
+Rust, `unsafe_code` forbidden crate-wide, six direct dependencies (`hmac`,
+`sha2`, `hkdf`, `subtle`, `zeroize`, `siphasher`) — RustCrypto crates plus
+their constant-time and zeroizing-memory helpers, plus `siphasher` for
+cipher `0x02`, pulling in their usual transitive tree (`digest`,
+`crypto-common`, `typenum`, and the like). MSRV 1.88, tracked in
+`Cargo.toml`'s `rust-version` and tested in CI.
 
 ```
 src/lib.rs      key schedule, epoch math, replay window, NUMBER/SERIES codec, pacer
@@ -56,9 +58,10 @@ src/control.rs  EPOCH_ANNOUNCE, TIME_ANNOUNCE, TIME_REQUEST, HEARTBEAT, CAPABILI
 src/peer.rs     per-epoch replay windows, multi-peer collector, cold-start clock
 ```
 
-Cipher suites `0x01` (HMAC-SHA256, 8-byte tag) and `0x04` (4-byte tag) are
-implemented. `0x02` (SipHash) and `0x03` (ChaCha20-Poly1305) are registered in
-the type but return `CipherUnimplemented` rather than pretending.
+Cipher suites `0x01` (HMAC-SHA256, 8-byte tag), `0x02` (SipHash-2-4, 8-byte
+tag), and `0x04` (HMAC-SHA256, 4-byte tag) are implemented. `0x03`
+(ChaCha20-Poly1305) is registered in the type but returns
+`CipherUnimplemented` rather than pretending.
 
 ### Running it
 
@@ -116,6 +119,13 @@ the redirect) and `docs/test-vectors.json` (written directly by the binary):
 ```bash
 cargo run --bin catp-vectors > docs/test-vectors.txt
 ```
+
+### Fuzzing
+
+[`fuzz/`](fuzz/README.md) targets `decode` -- the entire pre-authentication
+remote attack surface. CI runs both targets for a bounded 60 seconds per
+push as a regression gate; see `fuzz/README.md` for running a real campaign
+locally.
 
 ## Contributing
 
