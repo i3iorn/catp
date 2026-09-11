@@ -120,6 +120,16 @@ the redirect) and `docs/test-vectors.json` (written directly by the binary):
 cargo run --bin catp-vectors > docs/test-vectors.txt
 ```
 
+### Benchmarks
+
+```bash
+cargo bench
+```
+
+`encode`/`decode` cost, decode rejection cost by §7.4 step, and `epoch_key`
+derivation cost. `docs/DEPLOYMENT.md` D2 has one worked run's numbers plus a
+fleet-size memory table (`cargo run --release --example mem_probe`).
+
 ### Fuzzing
 
 [`fuzz/`](fuzz/README.md) targets `decode` -- the entire pre-authentication
