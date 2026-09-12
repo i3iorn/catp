@@ -282,7 +282,7 @@ impl Datagram {
         let mut signed = Vec::with_capacity(13 + payload.len());
         signed.extend_from_slice(&self.auth_header(epoch_id));
         signed.extend_from_slice(&payload);
-        let tag = mac(cipher, &key, &signed)?;
+        let tag = mac(cipher, &key, &signed, self.datagram_offset)?;
 
         let mut out = Vec::with_capacity(HEADER_LEN + payload.len() + tag.len());
         out.extend_from_slice(&self.header_bytes());
@@ -323,7 +323,7 @@ impl Datagram {
         let mut signed = Vec::with_capacity(13 + 8);
         signed.extend_from_slice(&d.auth_header(0)); // epoch_id 0: no epoch
         signed.extend_from_slice(&d.raw);
-        let tag = mac(CipherId::HmacSha256T64, &key, &signed)?;
+        let tag = mac(CipherId::HmacSha256T64, &key, &signed, 0)?;
         let mut out = Vec::with_capacity(HEADER_LEN + 8 + 8);
         out.extend_from_slice(&d.header_bytes());
         out.extend_from_slice(&d.raw);
@@ -350,7 +350,7 @@ impl Datagram {
             raw: Vec::new(),
         };
         let key = secret.time_key(sender_id, Direction::NodeToCollector);
-        let tag = mac(CipherId::HmacSha256T64, &key, &d.auth_header(0))?;
+        let tag = mac(CipherId::HmacSha256T64, &key, &d.auth_header(0), 0)?;
         let mut out = Vec::with_capacity(HEADER_LEN + 8);
         out.extend_from_slice(&d.header_bytes());
         out.extend_from_slice(&tag);
@@ -467,7 +467,7 @@ pub fn decode_time_request(
         raw: Vec::new(),
     };
     let key = secret.time_key(sender_id, Direction::NodeToCollector);
-    if !ct_eq(&mac(CipherId::HmacSha256T64, &key, &d.auth_header(0))?, &buf[HEADER_LEN..]) {
+    if !ct_eq(&mac(CipherId::HmacSha256T64, &key, &d.auth_header(0), 0)?, &buf[HEADER_LEN..]) {
         return Err(Error::AuthFailed);
     }
     Ok(())
@@ -507,7 +507,7 @@ pub fn decode_time_announce(
     let mut signed = Vec::with_capacity(13 + 8);
     signed.extend_from_slice(&d.auth_header(0));
     signed.extend_from_slice(payload);
-    if !ct_eq(&mac(CipherId::HmacSha256T64, &key, &signed)?, &buf[HEADER_LEN + 8..]) {
+    if !ct_eq(&mac(CipherId::HmacSha256T64, &key, &signed, 0)?, &buf[HEADER_LEN + 8..]) {
         return Err(Error::AuthFailed);
     }
     let mut b = [0u8; 8];
@@ -582,7 +582,7 @@ pub fn decode(
     let mut signed = Vec::with_capacity(13 + payload.len());
     signed.extend_from_slice(&out.auth_header(epoch_id));
     signed.extend_from_slice(payload);
-    if !ct_eq(&mac(cipher, &key, &signed)?, tag) {
+    if !ct_eq(&mac(cipher, &key, &signed, datagram_offset)?, tag) {
         return Err(Error::AuthFailed);
     }
 
@@ -896,6 +896,7 @@ mod tests {
             CipherId::HmacSha256T64,
             &s.time_key(0x1234, Direction::CollectorToNode),
             &d.auth_header(0),
+            0,
         )
         .unwrap();
         let mut forged = d.header_bytes().to_vec();

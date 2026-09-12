@@ -1,28 +1,38 @@
 # Dependency policy
 
 Non-normative, project-maintenance rather than protocol content. Addresses
-issue #39: the whole security of this crate rests on three pre-1.0
+issue #39: the whole security of this crate rests on several pre-1.0
 RustCrypto crates, and that fact deserves a stated policy rather than silent
 acceptance.
 
 ## Direct dependencies today
 
 ```
-hmac      0.13
-sha2      0.11
-hkdf      0.13
-subtle    2
-zeroize   1 (+derive)
-siphasher 1
+hmac              0.13
+sha2              0.11
+hkdf              0.13
+subtle            2
+zeroize           1 (+derive)
+siphasher         1
+chacha20poly1305  0.11 (+alloc)
 ```
 
-`subtle`, `zeroize`, and `siphasher` are 1.x; `hmac`, `sha2`, and `hkdf` are
-pre-1.0.
+`subtle`, `zeroize`, and `siphasher` are 1.x; `hmac`, `sha2`, `hkdf`, and
+`chacha20poly1305` are pre-1.0.
 
 `siphasher` (cipher `0x02`, PROTOCOL.md §7.2/§8.1, issue #33) is a single
 pure-Rust implementation with no further transitive dependencies of its own —
 the smallest possible addition for what it does, and there is no realistic
 alternative crate for SipHash-2-4 in Rust worth comparing it against.
+
+`chacha20poly1305` (cipher `0x03`, same sections, same issue) is the
+RustCrypto AEAD implementation, pulled in with `default-features = false,
+features = ["alloc"]` -- explicitly opting out of `getrandom`/`rand_core`
+(this crate never generates a random nonce; PROTOCOL.md 7.2's nonce is
+deterministic, derived from `datagram_offset`) and `zeroize` (already a
+direct dependency for other reasons, wired in separately). It brings in
+`chacha20`, `poly1305`, `cipher`, `aead`, `inout`, and `universal-hash` as its
+own transitive tree.
 
 ## Pre-1.0 RustCrypto is accepted, deliberately
 
