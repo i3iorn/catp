@@ -60,12 +60,9 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
-  # Advisory only: the repository is not rustfmt-clean yet (issue #27).
-  # Once a formatting commit lands, drop continue-on-error to make this a gate.
   fmt:
-    name: fmt (advisory)
+    name: fmt
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

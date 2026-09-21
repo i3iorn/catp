@@ -68,7 +68,11 @@ impl Capability {
         let (layout_pairs, remainder) = p[3 + nc..].as_chunks::<2>();
         debug_assert!(remainder.is_empty());
         let layouts = layout_pairs.iter().map(|c| (c[0], c[1])).collect();
-        Ok(Self { max_version, ciphers, layouts })
+        Ok(Self {
+            max_version,
+            ciphers,
+            layouts,
+        })
     }
 }
 
@@ -90,7 +94,9 @@ impl Control {
                 }
                 let mut b = [0u8; 8];
                 b.copy_from_slice(p);
-                Ok(Control::TimeAnnounce { asserted_time: i64::from_be_bytes(b) })
+                Ok(Control::TimeAnnounce {
+                    asserted_time: i64::from_be_bytes(b),
+                })
             }
             MsgType::Heartbeat => {
                 if !p.is_empty() {
@@ -128,7 +134,9 @@ mod tests {
 
     #[test]
     fn epoch_announce_roundtrip() {
-        let c = Control::EpochAnnounce { target_epoch: 0xDEAD_BEEF };
+        let c = Control::EpochAnnounce {
+            target_epoch: 0xDEAD_BEEF,
+        };
         let p = c.encode().unwrap();
         assert_eq!(p.len(), 4);
         assert_eq!(Control::parse(MsgType::EpochAnnounce, &p).unwrap(), c);
@@ -139,7 +147,10 @@ mod tests {
 
     #[test]
     fn heartbeat_must_be_empty() {
-        assert_eq!(Control::parse(MsgType::Heartbeat, &[]).unwrap(), Control::Heartbeat);
+        assert_eq!(
+            Control::parse(MsgType::Heartbeat, &[]).unwrap(),
+            Control::Heartbeat
+        );
         assert!(Control::parse(MsgType::Heartbeat, b"x").is_err());
     }
 
@@ -166,7 +177,11 @@ mod tests {
 
     #[test]
     fn empty_capability_is_legal() {
-        let c = Capability { max_version: 1, ciphers: vec![], layouts: vec![] };
+        let c = Capability {
+            max_version: 1,
+            ciphers: vec![],
+            layouts: vec![],
+        };
         let p = c.encode().unwrap();
         assert_eq!(p.len(), 3);
         assert_eq!(Capability::parse(&p).unwrap(), c);

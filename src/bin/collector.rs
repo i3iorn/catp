@@ -24,11 +24,17 @@ const ALARM_SCHEMA: u8 = 3;
 const UNSTRUCTURED: u8 = SCHEMA_UNSTRUCTURED;
 
 fn now_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).expect("clock before 1970").as_secs()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock before 1970")
+        .as_secs()
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).expect("clock before 1970").as_millis() as u64
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock before 1970")
+        .as_millis() as u64
 }
 
 /// Render an absolute instant from an epoch and a tick offset within it
@@ -112,7 +118,10 @@ fn render(r: &Record) -> String {
         (NONE, ALARM_SCHEMA) if r.body.len() >= 3 => {
             let n = r.body[2] as usize;
             if r.body.len() < 3 + n {
-                return format!("MALFORMED alarm: severity length {n} overruns {} bytes", r.body.len());
+                return format!(
+                    "MALFORMED alarm: severity length {n} overruns {} bytes",
+                    r.body.len()
+                );
             }
             format!(
                 "seq={:<5} [{}] {}",
@@ -122,15 +131,24 @@ fn render(r: &Record) -> String {
             )
         }
         (NONE, v @ (SENSOR_SCHEMA | EVENT_SCHEMA | ALARM_SCHEMA)) => {
-            format!("MALFORMED record for schema_version={v}: only {} bytes", r.body.len())
+            format!(
+                "MALFORMED record for schema_version={v}: only {} bytes",
+                r.body.len()
+            )
         }
-        (f, v) => format!("unhandled layout (format=0x{f:02X}, schema_version={v}), {} bytes", r.body.len()),
+        (f, v) => format!(
+            "unhandled layout (format=0x{f:02X}, schema_version={v}), {} bytes",
+            r.body.len()
+        ),
     }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
-    let bind = args.get(1).cloned().unwrap_or_else(|| "127.0.0.1:9999".into());
+    let bind = args
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| "127.0.0.1:9999".into());
     let bundle_dir = args.get(2);
 
     // A real collector serves many nodes; state is allocated here at
@@ -196,7 +214,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Discard silently on the wire otherwise; counted locally by
         // Collector itself (PROTOCOL.md 6.8) -- see the periodic snapshot
         // below.
-        if let Ok(acc) = collector.accept(&buf[..n], local_epoch, Direction::NodeToCollector, now_ms()) {
+        if let Ok(acc) =
+            collector.accept(&buf[..n], local_epoch, Direction::NodeToCollector, now_ms())
+        {
             // Every record in the datagram shares this instant
             // (PROTOCOL.md 6.4.1): the offset is a header field.
             let when = at(acc.epoch_id, acc.datagram_offset);
@@ -208,7 +228,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             match MsgType::from_u8(acc.datagram.msg_type) {
                 Some(MsgType::Number) => match acc.datagram.number_value() {
                     Some((scale, mantissa)) => {
-                        println!("{from}  {when}  NUMBER   {}", format_scaled(scale, mantissa));
+                        println!(
+                            "{from}  {when}  NUMBER   {}",
+                            format_scaled(scale, mantissa)
+                        );
                     }
                     None => println!("{from}  {when}  NUMBER   MALFORMED"),
                 },
@@ -232,7 +255,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         println!("{from}  {when}  {:<8} {}", label(mt), render(r));
                     }
                 }
-                Some(mt) => println!("{from}  {when}  {:<8} ({} bytes)", label(mt), acc.datagram.raw.len()),
+                Some(mt) => println!(
+                    "{from}  {when}  {:<8} ({} bytes)",
+                    label(mt),
+                    acc.datagram.raw.len()
+                ),
                 // decode() already validated msg_type at step 3, so this
                 // is unreachable in practice; nothing to count beyond
                 // what collector.stats() already tracks.

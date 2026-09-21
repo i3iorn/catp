@@ -15,7 +15,11 @@ pub struct Record {
 
 impl Record {
     pub fn new(format: Format, schema_version: u8, body: Vec<u8>) -> Self {
-        Self { format: format as u8, schema_version, body }
+        Self {
+            format: format as u8,
+            schema_version,
+            body,
+        }
     }
 
     pub fn wire_len(&self) -> usize {
@@ -64,7 +68,11 @@ impl Record {
             return Err(Error::Framing("record body overruns payload"));
         }
         Ok((
-            Record { format, schema_version, body: buf[RECORD_HEADER_LEN..end].to_vec() },
+            Record {
+                format,
+                schema_version,
+                body: buf[RECORD_HEADER_LEN..end].to_vec(),
+            },
             end,
         ))
     }
@@ -114,7 +122,9 @@ impl Datagram {
             return Err(Error::Framing("msg_type is not record-framed"));
         }
         if records.is_empty() {
-            return Err(Error::Framing("record-framed datagram needs at least one record"));
+            return Err(Error::Framing(
+                "record-framed datagram needs at least one record",
+            ));
         }
         if matches!(msg_type, MsgType::Event | MsgType::Alarm) && records.len() > 1 {
             return Err(Error::Framing("EVENT and ALARM carry exactly one record"));
@@ -144,7 +154,13 @@ impl Datagram {
         if datagram_offset >= TICKS_PER_EPOCH {
             return Err(Error::Framing("datagram_offset exceeds 19 bits"));
         }
-        let mut d = Self::base(MsgType::Number, cipher, sender_id, epoch_id, datagram_offset);
+        let mut d = Self::base(
+            MsgType::Number,
+            cipher,
+            sender_id,
+            epoch_id,
+            datagram_offset,
+        );
         d.raw = vec![scale];
         d.raw.extend_from_slice(&mantissa.to_be_bytes());
         Ok(d)
@@ -177,7 +193,8 @@ impl Datagram {
         if first_offset >= TICKS_PER_EPOCH {
             return Err(Error::Framing("datagram_offset exceeds 19 bits"));
         }
-        let mut raw = Vec::with_capacity(NUMBER_PAYLOAD_LEN + SERIES_ENTRY_LEN * (readings.len() - 1));
+        let mut raw =
+            Vec::with_capacity(NUMBER_PAYLOAD_LEN + SERIES_ENTRY_LEN * (readings.len() - 1));
         raw.push(scale);
         raw.extend_from_slice(&first_mantissa.to_be_bytes());
         let mut prev = first_offset;
@@ -193,7 +210,9 @@ impl Datagram {
             prev = offset;
         }
         if prev >= TICKS_PER_EPOCH {
-            return Err(Error::BadSeries("reading instant crosses the epoch boundary"));
+            return Err(Error::BadSeries(
+                "reading instant crosses the epoch boundary",
+            ));
         }
         let mut d = Self::base(MsgType::Series, cipher, sender_id, epoch_id, first_offset);
         d.raw = raw;
@@ -445,11 +464,7 @@ fn check_time_header(buf: &[u8], want: MsgType, sender_id: u32) -> Result<u8, Er
 /// this node is asking. Because it carries `datagram_offset` 0 by
 /// construction, the replay window of Section 10.2 cannot cover it, so callers
 /// MUST rate-limit their responses.
-pub fn decode_time_request(
-    buf: &[u8],
-    sender_id: u32,
-    secret: &DeviceSecret,
-) -> Result<(), Error> {
+pub fn decode_time_request(buf: &[u8], sender_id: u32, secret: &DeviceSecret) -> Result<(), Error> {
     let tag_len = CipherId::HmacSha256T64.tag_len();
     if buf.len() != HEADER_LEN + tag_len {
         return Err(Error::TooShort);
@@ -467,7 +482,10 @@ pub fn decode_time_request(
         raw: Vec::new(),
     };
     let key = secret.time_key(sender_id, Direction::NodeToCollector);
-    if !ct_eq(&mac(CipherId::HmacSha256T64, &key, &d.auth_header(0), 0)?, &buf[HEADER_LEN..]) {
+    if !ct_eq(
+        &mac(CipherId::HmacSha256T64, &key, &d.auth_header(0), 0)?,
+        &buf[HEADER_LEN..],
+    ) {
         return Err(Error::AuthFailed);
     }
     Ok(())
@@ -507,7 +525,10 @@ pub fn decode_time_announce(
     let mut signed = Vec::with_capacity(13 + 8);
     signed.extend_from_slice(&d.auth_header(0));
     signed.extend_from_slice(payload);
-    if !ct_eq(&mac(CipherId::HmacSha256T64, &key, &signed, 0)?, &buf[HEADER_LEN + 8..]) {
+    if !ct_eq(
+        &mac(CipherId::HmacSha256T64, &key, &signed, 0)?,
+        &buf[HEADER_LEN + 8..],
+    ) {
         return Err(Error::AuthFailed);
     }
     let mut b = [0u8; 8];
@@ -534,8 +555,7 @@ pub fn decode(
     let cipher_id = (buf[1] >> 4) & 0x0F;
     let epoch_low = buf[1] & 0x0F;
     let reserved = (buf[2] >> 3) & 0x1F; // must-ignore (PROTOCOL.md 4.2)
-    let datagram_offset =
-        (((buf[2] & 0x07) as u32) << 16) | ((buf[3] as u32) << 8) | buf[4] as u32;
+    let datagram_offset = (((buf[2] & 0x07) as u32) << 16) | ((buf[3] as u32) << 8) | buf[4] as u32;
     let sender_id = u32::from_be_bytes([buf[5], buf[6], buf[7], buf[8]]);
 
     // --- step 2: version
@@ -554,7 +574,10 @@ pub fn decode(
     }
     // --- step 5: cipher_id matches configuration
     if cipher_id != peer.cipher as u8 {
-        return Err(Error::CipherMismatch { got: cipher_id, want: peer.cipher as u8 });
+        return Err(Error::CipherMismatch {
+            got: cipher_id,
+            want: peer.cipher as u8,
+        });
     }
     let cipher = CipherId::from_u8(cipher_id).ok_or(Error::CipherUnimplemented(cipher_id))?;
     let tag_len = cipher.tag_len();
@@ -630,7 +653,12 @@ pub fn decode(
         skipped = drop;
     }
 
-    Ok(Accepted { datagram: out, epoch_id, datagram_offset, skipped })
+    Ok(Accepted {
+        datagram: out,
+        epoch_id,
+        datagram_offset,
+        skipped,
+    })
 }
 
 #[cfg(test)]
@@ -727,7 +755,14 @@ mod tests {
             vec![held.clone(), same_width_unheld.clone()],
         )
         .unwrap();
-        let wire = dg.encode(&p.secret, EPOCH, Direction::NodeToCollector, MAX_DATAGRAM_IPV4).unwrap();
+        let wire = dg
+            .encode(
+                &p.secret,
+                EPOCH,
+                Direction::NodeToCollector,
+                MAX_DATAGRAM_IPV4,
+            )
+            .unwrap();
         let mut w = ReplayWindow::one_second();
         let acc = decode(&wire, &p, EPOCH, Direction::NodeToCollector, &mut w).unwrap();
         assert_eq!(acc.datagram.records, vec![held]);
@@ -751,8 +786,16 @@ mod tests {
         // Regression guard for reading bytes 3..5 as a u16 (PROTOCOL.md 4.1).
         let p = peer();
         for off in [0u32, 65_535, 65_536, 300_000, TICKS_PER_EPOCH - 1] {
-            let dg = Datagram::number(CipherId::HmacSha256T32, p.sender_id, EPOCH, off, 1, 15).unwrap();
-            let wire = dg.encode(&p.secret, EPOCH, Direction::NodeToCollector, MAX_DATAGRAM_IPV4).unwrap();
+            let dg =
+                Datagram::number(CipherId::HmacSha256T32, p.sender_id, EPOCH, off, 1, 15).unwrap();
+            let wire = dg
+                .encode(
+                    &p.secret,
+                    EPOCH,
+                    Direction::NodeToCollector,
+                    MAX_DATAGRAM_IPV4,
+                )
+                .unwrap();
             let mut w = ReplayWindow::one_second();
             let acc = decode(&wire, &p, EPOCH, Direction::NodeToCollector, &mut w).unwrap();
             assert_eq!(acc.datagram_offset, off, "offset {off} did not survive");
@@ -763,7 +806,14 @@ mod tests {
     fn number_roundtrip_and_size() {
         let p = peer();
         let dg = Datagram::number(CipherId::HmacSha256T32, p.sender_id, EPOCH, 42, 1, 235).unwrap();
-        let wire = dg.encode(&p.secret, EPOCH, Direction::NodeToCollector, MAX_DATAGRAM_IPV4).unwrap();
+        let wire = dg
+            .encode(
+                &p.secret,
+                EPOCH,
+                Direction::NodeToCollector,
+                MAX_DATAGRAM_IPV4,
+            )
+            .unwrap();
         assert_eq!(wire.len(), HEADER_LEN + NUMBER_PAYLOAD_LEN + 4); // 9 header + 3 payload + 4 tag
         let mut w = ReplayWindow::one_second();
         let acc = decode(&wire, &p, EPOCH, Direction::NodeToCollector, &mut w).unwrap();
@@ -777,13 +827,35 @@ mod tests {
         // Same value, same precision (scale=2, i.e. hundredths): 23.50.
         let n = Datagram::number(CipherId::HmacSha256T32, p.sender_id, EPOCH, 1, 2, 2350)
             .unwrap()
-            .encode(&p.secret, EPOCH, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
+            .encode(
+                &p.secret,
+                EPOCH,
+                Direction::NodeToCollector,
+                MAX_DATAGRAM_IPV4,
+            )
             .unwrap();
-        let m = Datagram::data(MsgType::Message, CipherId::HmacSha256T32, p.sender_id, EPOCH, 1, vec![rec(&2350i16.to_be_bytes())])
-            .unwrap()
-            .encode(&p.secret, EPOCH, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
-            .unwrap();
-        assert!(n.len() < m.len(), "NUMBER {} vs MESSAGE {}", n.len(), m.len());
+        let m = Datagram::data(
+            MsgType::Message,
+            CipherId::HmacSha256T32,
+            p.sender_id,
+            EPOCH,
+            1,
+            vec![rec(&2350i16.to_be_bytes())],
+        )
+        .unwrap()
+        .encode(
+            &p.secret,
+            EPOCH,
+            Direction::NodeToCollector,
+            MAX_DATAGRAM_IPV4,
+        )
+        .unwrap();
+        assert!(
+            n.len() < m.len(),
+            "NUMBER {} vs MESSAGE {}",
+            n.len(),
+            m.len()
+        );
     }
 
     #[test]
@@ -791,9 +863,17 @@ mod tests {
         let p = peer();
         // Authenticate a bad payload the way a defective sender would: same
         // length, but scale 0x00 is invalid (PROTOCOL.md 6.3.1).
-        let mut dg = Datagram::number(CipherId::HmacSha256T32, p.sender_id, EPOCH, 7, 1, 10).unwrap();
+        let mut dg =
+            Datagram::number(CipherId::HmacSha256T32, p.sender_id, EPOCH, 7, 1, 10).unwrap();
         dg.raw = vec![0x00, 0x00, 0x01];
-        let wire = dg.encode(&p.secret, EPOCH, Direction::NodeToCollector, MAX_DATAGRAM_IPV4).unwrap();
+        let wire = dg
+            .encode(
+                &p.secret,
+                EPOCH,
+                Direction::NodeToCollector,
+                MAX_DATAGRAM_IPV4,
+            )
+            .unwrap();
         let mut w = ReplayWindow::one_second();
         assert!(matches!(
             decode(&wire, &p, EPOCH, Direction::NodeToCollector, &mut w),
@@ -804,8 +884,23 @@ mod tests {
     #[test]
     fn roundtrip_and_replay() {
         let p = peer();
-        let dg = Datagram::data(MsgType::Message, CipherId::HmacSha256T32, p.sender_id, EPOCH, 100, vec![rec(b"\x01\x02"), rec(b"\x03\x04")]).unwrap();
-        let wire = dg.encode(&p.secret, EPOCH, Direction::NodeToCollector, MAX_DATAGRAM_IPV4).unwrap();
+        let dg = Datagram::data(
+            MsgType::Message,
+            CipherId::HmacSha256T32,
+            p.sender_id,
+            EPOCH,
+            100,
+            vec![rec(b"\x01\x02"), rec(b"\x03\x04")],
+        )
+        .unwrap();
+        let wire = dg
+            .encode(
+                &p.secret,
+                EPOCH,
+                Direction::NodeToCollector,
+                MAX_DATAGRAM_IPV4,
+            )
+            .unwrap();
         assert_eq!(wire.len(), HEADER_LEN + 2 * (RECORD_HEADER_LEN + 2) + 4);
         let mut w = ReplayWindow::one_second();
         let acc = decode(&wire, &p, EPOCH, Direction::NodeToCollector, &mut w).unwrap();
@@ -819,8 +914,23 @@ mod tests {
     #[test]
     fn tampering_any_bit_fails_auth() {
         let p = peer();
-        let dg = Datagram::data(MsgType::Message, CipherId::HmacSha256T32, p.sender_id, EPOCH, 9, vec![rec(b"xy")]).unwrap();
-        let wire = dg.encode(&p.secret, EPOCH, Direction::NodeToCollector, MAX_DATAGRAM_IPV4).unwrap();
+        let dg = Datagram::data(
+            MsgType::Message,
+            CipherId::HmacSha256T32,
+            p.sender_id,
+            EPOCH,
+            9,
+            vec![rec(b"xy")],
+        )
+        .unwrap();
+        let wire = dg
+            .encode(
+                &p.secret,
+                EPOCH,
+                Direction::NodeToCollector,
+                MAX_DATAGRAM_IPV4,
+            )
+            .unwrap();
         for byte in 0..wire.len() {
             for bit in 0..8 {
                 let mut t = wire.clone();
@@ -838,9 +948,24 @@ mod tests {
     fn reserved_bits_ignored_across_all_32_values() {
         let p = peer();
         for rsv in 0..32u8 {
-            let mut dg = Datagram::data(MsgType::Message, CipherId::HmacSha256T32, p.sender_id, EPOCH, 11, vec![rec(b"ab")]).unwrap();
+            let mut dg = Datagram::data(
+                MsgType::Message,
+                CipherId::HmacSha256T32,
+                p.sender_id,
+                EPOCH,
+                11,
+                vec![rec(b"ab")],
+            )
+            .unwrap();
             dg.reserved = rsv;
-            let wire = dg.encode(&p.secret, EPOCH, Direction::NodeToCollector, MAX_DATAGRAM_IPV4).unwrap();
+            let wire = dg
+                .encode(
+                    &p.secret,
+                    EPOCH,
+                    Direction::NodeToCollector,
+                    MAX_DATAGRAM_IPV4,
+                )
+                .unwrap();
             let mut w = ReplayWindow::one_second();
             let acc = decode(&wire, &p, EPOCH, Direction::NodeToCollector, &mut w)
                 .unwrap_or_else(|e| panic!("reserved={rsv} rejected: {e:?}"));
@@ -858,10 +983,21 @@ mod tests {
             p.sender_id,
             EPOCH,
             5,
-            vec![rec(b"ok"), Record::new(Format::Cbor, 9, b"??".to_vec()), rec(b"ok2")],
+            vec![
+                rec(b"ok"),
+                Record::new(Format::Cbor, 9, b"??".to_vec()),
+                rec(b"ok2"),
+            ],
         )
         .unwrap();
-        let wire = dg.encode(&p.secret, EPOCH, Direction::NodeToCollector, MAX_DATAGRAM_IPV4).unwrap();
+        let wire = dg
+            .encode(
+                &p.secret,
+                EPOCH,
+                Direction::NodeToCollector,
+                MAX_DATAGRAM_IPV4,
+            )
+            .unwrap();
         let mut w = ReplayWindow::one_second();
         let acc = decode(&wire, &p, EPOCH, Direction::NodeToCollector, &mut w).unwrap();
         assert_eq!(acc.datagram.records.len(), 2);
@@ -901,7 +1037,10 @@ mod tests {
         .unwrap();
         let mut forged = d.header_bytes().to_vec();
         forged.extend_from_slice(&wrong);
-        assert_eq!(decode_time_request(&forged, 0x1234, &s).unwrap_err(), Error::AuthFailed);
+        assert_eq!(
+            decode_time_request(&forged, 0x1234, &s).unwrap_err(),
+            Error::AuthFailed
+        );
     }
 
     #[test]
@@ -923,8 +1062,23 @@ mod tests {
     #[test]
     fn heartbeat_has_empty_payload() {
         let p = peer();
-        let dg = Datagram::control(MsgType::Heartbeat, CipherId::HmacSha256T32, p.sender_id, EPOCH, 77, &[]).unwrap();
-        let wire = dg.encode(&p.secret, EPOCH, Direction::NodeToCollector, MAX_DATAGRAM_IPV4).unwrap();
+        let dg = Datagram::control(
+            MsgType::Heartbeat,
+            CipherId::HmacSha256T32,
+            p.sender_id,
+            EPOCH,
+            77,
+            &[],
+        )
+        .unwrap();
+        let wire = dg
+            .encode(
+                &p.secret,
+                EPOCH,
+                Direction::NodeToCollector,
+                MAX_DATAGRAM_IPV4,
+            )
+            .unwrap();
         assert_eq!(wire.len(), HEADER_LEN + 4);
         let mut w = ReplayWindow::one_second();
         let acc = decode(&wire, &p, EPOCH, Direction::NodeToCollector, &mut w).unwrap();
@@ -937,12 +1091,29 @@ mod tests {
         let p = peer();
         let n = Datagram::number(CipherId::HmacSha256T32, p.sender_id, EPOCH, 500, 1, 10)
             .unwrap()
-            .encode(&p.secret, EPOCH, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
+            .encode(
+                &p.secret,
+                EPOCH,
+                Direction::NodeToCollector,
+                MAX_DATAGRAM_IPV4,
+            )
             .unwrap();
-        let m = Datagram::data(MsgType::Message, CipherId::HmacSha256T32, p.sender_id, EPOCH, 500, vec![rec(b"z")])
-            .unwrap()
-            .encode(&p.secret, EPOCH, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
-            .unwrap();
+        let m = Datagram::data(
+            MsgType::Message,
+            CipherId::HmacSha256T32,
+            p.sender_id,
+            EPOCH,
+            500,
+            vec![rec(b"z")],
+        )
+        .unwrap()
+        .encode(
+            &p.secret,
+            EPOCH,
+            Direction::NodeToCollector,
+            MAX_DATAGRAM_IPV4,
+        )
+        .unwrap();
         let mut w = ReplayWindow::one_second();
         assert!(decode(&n, &p, EPOCH, Direction::NodeToCollector, &mut w).is_ok());
         assert_eq!(

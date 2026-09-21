@@ -71,13 +71,13 @@ catching wire-format drift, not a bug in the test.
 cargo build --all-targets
 cargo test --all-targets
 cargo clippy --all-targets -- -D warnings
+cargo fmt --check
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 ```
 
-`cargo fmt --check` is currently advisory in CI
-([#27](https://github.com/i3iorn/catp/issues/27)'s follow-up) — the repository
-isn't fully rustfmt-clean yet, so a failure there alone isn't a blocker, but
-please don't make the drift worse in new code.
+`cargo fmt --check` is a required CI gate
+([#27](https://github.com/i3iorn/catp/issues/27)): run `cargo fmt` before
+committing.
 
 ## Issues
 

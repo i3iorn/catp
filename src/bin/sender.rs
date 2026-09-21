@@ -160,7 +160,11 @@ fn make_records(seq: u32) -> Vec<Record> {
 
     vec![
         Record::new(Format::None, SENSOR_SCHEMA, packed),
-        Record::new(Format::None, UNSTRUCTURED, reading_text(values).into_bytes()),
+        Record::new(
+            Format::None,
+            UNSTRUCTURED,
+            reading_text(values).into_bytes(),
+        ),
     ]
 }
 
@@ -217,24 +221,12 @@ fn alarm_payload(seq: u32) -> (&'static str, &'static str) {
     }
 }
 
-fn make_datagram(
-    kind: MessageKind,
-    seq: u32,
-    epoch: u32,
-    offset: u32,
-) -> Result<Datagram, Error> {
+fn make_datagram(kind: MessageKind, seq: u32, epoch: u32, offset: u32) -> Result<Datagram, Error> {
     match kind {
         MessageKind::Message => {
             let records = make_records(seq);
 
-            Datagram::data(
-                MsgType::Message,
-                CIPHER,
-                SENDER_ID,
-                epoch,
-                offset,
-                records,
-            )
+            Datagram::data(MsgType::Message, CIPHER, SENDER_ID, epoch, offset, records)
         }
 
         MessageKind::Number => {
@@ -299,11 +291,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .cloned()
         .unwrap_or_else(|| "127.0.0.1:9999".into());
 
-    let rate_hz: u64 = args
-        .get(2)
-        .map(|s| s.parse())
-        .transpose()?
-        .unwrap_or(4);
+    let rate_hz: u64 = args.get(2).map(|s| s.parse()).transpose()?.unwrap_or(4);
 
     let sock = UdpSocket::bind("0.0.0.0:0")?;
     let secret = DeviceSecret::new(SECRET);
@@ -398,8 +386,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Err(e) => eprintln!("encode failed: {e}"),
         }
 
-        std::thread::sleep(Duration::from_millis(
-            1000 / rate_hz.max(1),
-        ));
+        std::thread::sleep(Duration::from_millis(1000 / rate_hz.max(1)));
     }
 }

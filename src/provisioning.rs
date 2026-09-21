@@ -99,7 +99,9 @@ impl Bundle {
         out.push('\n');
         out.push_str(&format!("cipher_id     {:02x}\n", self.cipher_id));
         for (format, schema_version) in &self.layouts {
-            out.push_str(&format!("layout        {format:02x} {schema_version:02x}\n"));
+            out.push_str(&format!(
+                "layout        {format:02x} {schema_version:02x}\n"
+            ));
         }
         out
     }
@@ -131,16 +133,17 @@ impl Bundle {
                     );
                 }
                 "device_secret" => {
-                    let bytes = parse_hex_bytes(rest)
-                        .map_err(|_| bad("device_secret is not valid hex"))?;
-                    let arr: [u8; 32] = bytes
-                        .try_into()
-                        .map_err(|_| bad("device_secret must be exactly 32 bytes (64 hex digits)"))?;
+                    let bytes =
+                        parse_hex_bytes(rest).map_err(|_| bad("device_secret is not valid hex"))?;
+                    let arr: [u8; 32] = bytes.try_into().map_err(|_| {
+                        bad("device_secret must be exactly 32 bytes (64 hex digits)")
+                    })?;
                     device_secret = Some(arr);
                 }
                 "cipher_id" => {
                     cipher_id = Some(
-                        u8::from_str_radix(rest, 16).map_err(|_| bad("cipher_id is not 2 hex digits"))?,
+                        u8::from_str_radix(rest, 16)
+                            .map_err(|_| bad("cipher_id is not 2 hex digits"))?,
                     );
                 }
                 "layout" => {
@@ -154,7 +157,8 @@ impl Bundle {
                     if parts.next().is_some() {
                         return Err(bad("layout line has more than two fields"));
                     }
-                    let format = u8::from_str_radix(format, 16).map_err(|_| bad("layout format is not hex"))?;
+                    let format = u8::from_str_radix(format, 16)
+                        .map_err(|_| bad("layout format is not hex"))?;
                     let schema_version = u8::from_str_radix(schema_version, 16)
                         .map_err(|_| bad("layout schema_version is not hex"))?;
                     layouts.push((format, schema_version));
@@ -189,8 +193,12 @@ impl Bundle {
         {
             use std::io::Write;
             use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-            let mut f =
-                fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
+            let mut f = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(path)?;
             f.set_permissions(fs::Permissions::from_mode(0o600))?;
             f.write_all(self.to_text().as_bytes())?;
             Ok(())
@@ -215,7 +223,10 @@ impl Bundle {
     /// suite; fails with [`Error::CipherRequiresRateLimit`] if the suite
     /// requires a limit (PROTOCOL.md 8.1.1) and `inbound_rate_limit` is
     /// `None`, exactly as [`crate::peer::PeerState::new`] would.
-    pub fn into_peer_config(&self, inbound_rate_limit: Option<RateLimit>) -> Result<PeerConfig, Error> {
+    pub fn into_peer_config(
+        &self,
+        inbound_rate_limit: Option<RateLimit>,
+    ) -> Result<PeerConfig, Error> {
         let cipher =
             CipherId::from_u8(self.cipher_id).ok_or(Error::CipherUnimplemented(self.cipher_id))?;
         if cipher.requires_inbound_rate_limit() && inbound_rate_limit.is_none() {
@@ -279,7 +290,10 @@ mod tests {
 
     #[test]
     fn to_text_matches_documented_format() {
-        let b = Bundle { layouts: vec![(1, 1)], ..sample() };
+        let b = Bundle {
+            layouts: vec![(1, 1)],
+            ..sample()
+        };
         let text = b.to_text();
         assert!(text.starts_with("# CATP provisioning bundle v1\n"));
         assert!(text.contains("sender_id     12345678\n"));
@@ -292,26 +306,38 @@ mod tests {
 
     #[test]
     fn empty_layouts_round_trip() {
-        let b = Bundle { layouts: vec![], ..sample() };
+        let b = Bundle {
+            layouts: vec![],
+            ..sample()
+        };
         assert_eq!(Bundle::parse(&b.to_text()).unwrap(), b);
     }
 
     #[test]
     fn missing_field_is_rejected() {
         let text = "sender_id 12345678\ncipher_id 04\n";
-        assert!(matches!(Bundle::parse(text), Err(ProvisionError::Format(_))));
+        assert!(matches!(
+            Bundle::parse(text),
+            Err(ProvisionError::Format(_))
+        ));
     }
 
     #[test]
     fn short_secret_is_rejected_not_zero_padded() {
         let text = "sender_id 12345678\ndevice_secret 4242\ncipher_id 04\n";
-        assert!(matches!(Bundle::parse(text), Err(ProvisionError::Format(_))));
+        assert!(matches!(
+            Bundle::parse(text),
+            Err(ProvisionError::Format(_))
+        ));
     }
 
     #[test]
     fn unrecognized_field_is_rejected() {
         let text = "sender_id 12345678\ndevice_secret 4242424242424242424242424242424242424242424242424242424242424242\ncipher_id 04\nnotes hello\n";
-        assert!(matches!(Bundle::parse(text), Err(ProvisionError::Format(_))));
+        assert!(matches!(
+            Bundle::parse(text),
+            Err(ProvisionError::Format(_))
+        ));
     }
 
     #[test]
@@ -325,7 +351,9 @@ mod tests {
     #[test]
     fn into_peer_config_carries_every_field() {
         let b = sample();
-        let cfg = b.into_peer_config(Some(RateLimit::RECOMMENDED_DEFAULT)).unwrap();
+        let cfg = b
+            .into_peer_config(Some(RateLimit::RECOMMENDED_DEFAULT))
+            .unwrap();
         assert_eq!(cfg.sender_id, b.sender_id);
         assert_eq!(cfg.secret.expose_secret(), &b.device_secret);
         assert_eq!(cfg.cipher as u8, b.cipher_id);
@@ -334,20 +362,36 @@ mod tests {
 
     #[test]
     fn into_peer_config_rejects_unimplemented_cipher() {
-        let b = Bundle { cipher_id: 0xFE, ..sample() };
-        assert!(matches!(b.into_peer_config(None), Err(Error::CipherUnimplemented(0xFE))));
+        let b = Bundle {
+            cipher_id: 0xFE,
+            ..sample()
+        };
+        assert!(matches!(
+            b.into_peer_config(None),
+            Err(Error::CipherUnimplemented(0xFE))
+        ));
     }
 
     #[test]
     fn into_peer_config_requires_rate_limit_for_0x04() {
-        let b = Bundle { cipher_id: 0x04, ..sample() };
-        assert!(matches!(b.into_peer_config(None), Err(Error::CipherRequiresRateLimit(0x04))));
-        assert!(b.into_peer_config(Some(RateLimit::RECOMMENDED_DEFAULT)).is_ok());
+        let b = Bundle {
+            cipher_id: 0x04,
+            ..sample()
+        };
+        assert!(matches!(
+            b.into_peer_config(None),
+            Err(Error::CipherRequiresRateLimit(0x04))
+        ));
+        assert!(
+            b.into_peer_config(Some(RateLimit::RECOMMENDED_DEFAULT))
+                .is_ok()
+        );
     }
 
     #[test]
     fn file_round_trip() {
-        let dir = std::env::temp_dir().join(format!("catp-provisioning-test-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("catp-provisioning-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("node.bundle");
         let b = sample();
@@ -360,7 +404,10 @@ mod tests {
     #[test]
     fn write_file_tightens_an_existing_worlds_readable_file() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("catp-provisioning-test-perm-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "catp-provisioning-test-perm-{}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("node.bundle");
         // Simulate a file that pre-existed with looser permissions -- e.g.
@@ -373,16 +420,26 @@ mod tests {
         sample().write_file(&path).unwrap();
 
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "existing file's permissions were not tightened");
+        assert_eq!(
+            mode, 0o600,
+            "existing file's permissions were not tightened"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn load_bundles_dir_reads_only_dot_bundle_files_in_sorted_order() {
-        let dir = std::env::temp_dir().join(format!("catp-provisioning-test-dir-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("catp-provisioning-test-dir-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let b1 = Bundle { sender_id: 1, ..sample() };
-        let b2 = Bundle { sender_id: 2, ..sample() };
+        let b1 = Bundle {
+            sender_id: 1,
+            ..sample()
+        };
+        let b2 = Bundle {
+            sender_id: 2,
+            ..sample()
+        };
         b2.write_file(&dir.join("b-second.bundle")).unwrap();
         b1.write_file(&dir.join("a-first.bundle")).unwrap();
         std::fs::write(dir.join("readme.txt"), "not a bundle").unwrap();

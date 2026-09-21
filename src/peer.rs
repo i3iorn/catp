@@ -9,7 +9,7 @@
 //!   `Collector` expose, categorized by the Section 7.4 step that would
 //!   have rejected the datagram (Section 6.8).
 
-use crate::wire::{decode, Accepted, PeerConfig};
+use crate::wire::{Accepted, PeerConfig, decode};
 use crate::*;
 use std::collections::HashMap;
 
@@ -83,9 +83,10 @@ impl Stats {
             Error::EpochOutOfWindow => self.epoch_out_of_window += 1,
             Error::AuthFailed => self.auth_failed += 1,
             Error::Replay => self.replay += 1,
-            Error::Framing(_) | Error::BadNumber(_) | Error::BadSeries(_) | Error::BodyTooLarge(_) => {
-                self.framing += 1
-            }
+            Error::Framing(_)
+            | Error::BadNumber(_)
+            | Error::BadSeries(_)
+            | Error::BodyTooLarge(_) => self.framing += 1,
             Error::RateLimited => self.rate_limited += 1,
             // Everything else (CipherUnimplemented, Oversize, OffsetReuse,
             // EpochRollback, TimeRollback, ClockAlreadyValid, NoClock,
@@ -160,7 +161,8 @@ impl PeerState {
     /// Windows for epochs outside the acceptance window are discarded
     /// (PROTOCOL.md 10.2).
     fn prune(&mut self, local_epoch: u32) {
-        self.windows.retain(|&e, _| e + 1 >= local_epoch && e <= local_epoch);
+        self.windows
+            .retain(|&e, _| e + 1 >= local_epoch && e <= local_epoch);
     }
 
     /// Verify one datagram from this peer.
@@ -231,7 +233,10 @@ impl PeerState {
     /// old announcement to force a return to compromised material.
     pub fn accept_epoch_announce(&mut self, target_epoch: u32) -> Result<(), Error> {
         match self.highest_epoch_announced {
-            Some(hi) if target_epoch <= hi => Err(Error::EpochRollback { got: target_epoch, hi }),
+            Some(hi) if target_epoch <= hi => Err(Error::EpochRollback {
+                got: target_epoch,
+                hi,
+            }),
             _ => {
                 self.highest_epoch_announced = Some(target_epoch);
                 Ok(())
@@ -265,7 +270,10 @@ impl Default for Collector {
 
 impl Collector {
     pub fn new() -> Self {
-        Self { peers: HashMap::new(), own_stats: Stats::default() }
+        Self {
+            peers: HashMap::new(),
+            own_stats: Stats::default(),
+        }
     }
 
     /// Provision a peer. PROTOCOL.md 12.5 requires state to be allocated here,
@@ -474,10 +482,24 @@ mod tests {
         // reset each epoch and each epoch has its own window.
         for epoch in [e - 1, e] {
             let dg = Datagram::number(CipherId::HmacSha256T32, 1, epoch, 4242, 1, 15).unwrap();
-            let w = dg.encode(&secret, epoch, Direction::NodeToCollector, MAX_DATAGRAM_IPV4).unwrap();
-            assert!(st.accept(&w, e, Direction::NodeToCollector, 0).is_ok(), "epoch {epoch}");
+            let w = dg
+                .encode(
+                    &secret,
+                    epoch,
+                    Direction::NodeToCollector,
+                    MAX_DATAGRAM_IPV4,
+                )
+                .unwrap();
+            assert!(
+                st.accept(&w, e, Direction::NodeToCollector, 0).is_ok(),
+                "epoch {epoch}"
+            );
         }
-        assert_eq!(st.live_windows(), 2, "acceptance window is exactly two epochs wide");
+        assert_eq!(
+            st.live_windows(),
+            2,
+            "acceptance window is exactly two epochs wide"
+        );
     }
 
     #[test]
@@ -493,9 +515,20 @@ mod tests {
         .unwrap();
         for epoch in 1000..1010u32 {
             let dg = Datagram::number(CipherId::HmacSha256T32, 1, epoch, 7, 1, 10).unwrap();
-            let w = dg.encode(&secret, epoch, Direction::NodeToCollector, MAX_DATAGRAM_IPV4).unwrap();
+            let w = dg
+                .encode(
+                    &secret,
+                    epoch,
+                    Direction::NodeToCollector,
+                    MAX_DATAGRAM_IPV4,
+                )
+                .unwrap();
             st.accept(&w, epoch, Direction::NodeToCollector, 0).unwrap();
-            assert!(st.live_windows() <= 2, "epoch {epoch}: {} windows", st.live_windows());
+            assert!(
+                st.live_windows() <= 2,
+                "epoch {epoch}: {} windows",
+                st.live_windows()
+            );
         }
     }
 
@@ -509,7 +542,12 @@ mod tests {
         for id in [0xAAAAu32, 0xBBBB] {
             let dg = Datagram::number(CipherId::HmacSha256T32, id, e, 99, 1, 70).unwrap();
             let w = dg
-                .encode(&cfg(id).secret, e, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
+                .encode(
+                    &cfg(id).secret,
+                    e,
+                    Direction::NodeToCollector,
+                    MAX_DATAGRAM_IPV4,
+                )
                 .unwrap();
             let acc = c.accept(&w, e, Direction::NodeToCollector, 0).unwrap();
             assert_eq!(acc.datagram.sender_id, id);
@@ -518,7 +556,12 @@ mod tests {
         // An unprovisioned sender is rejected with no state allocated.
         let dg = Datagram::number(CipherId::HmacSha256T32, 0xCCCC, e, 99, 1, 70).unwrap();
         let w = dg
-            .encode(&cfg(0xCCCC).secret, e, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
+            .encode(
+                &cfg(0xCCCC).secret,
+                e,
+                Direction::NodeToCollector,
+                MAX_DATAGRAM_IPV4,
+            )
             .unwrap();
         assert_eq!(
             c.accept(&w, e, Direction::NodeToCollector, 0).unwrap_err(),
@@ -534,9 +577,17 @@ mod tests {
         // Claim to be AAAA but sign with BBBB's secret (PROTOCOL.md 9.2.1).
         let dg = Datagram::number(CipherId::HmacSha256T32, 0xAAAA, e, 5, 1, 10).unwrap();
         let w = dg
-            .encode(&cfg(0xBBBB).secret, e, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
+            .encode(
+                &cfg(0xBBBB).secret,
+                e,
+                Direction::NodeToCollector,
+                MAX_DATAGRAM_IPV4,
+            )
             .unwrap();
-        assert_eq!(c.accept(&w, e, Direction::NodeToCollector, 0).unwrap_err(), Error::AuthFailed);
+        assert_eq!(
+            c.accept(&w, e, Direction::NodeToCollector, 0).unwrap_err(),
+            Error::AuthFailed
+        );
     }
 
     #[test]
@@ -544,7 +595,10 @@ mod tests {
         let mut c = cfg(1);
         c.inbound_rate_limit = None;
         match PeerState::new(c) {
-            Err(e) => assert_eq!(e, Error::CipherRequiresRateLimit(CipherId::HmacSha256T32 as u8)),
+            Err(e) => assert_eq!(
+                e,
+                Error::CipherRequiresRateLimit(CipherId::HmacSha256T32 as u8)
+            ),
             Ok(_) => panic!("expected CipherRequiresRateLimit"),
         }
     }
@@ -565,7 +619,10 @@ mod tests {
             secret: secret.clone(),
             cipher: CipherId::HmacSha256T32,
             layouts: vec![(Format::None as u8, 1)],
-            inbound_rate_limit: Some(RateLimit { per_sec: 10, burst: 2 }),
+            inbound_rate_limit: Some(RateLimit {
+                per_sec: 10,
+                burst: 2,
+            }),
         })
         .unwrap();
         let e = 2000u32;
@@ -578,10 +635,17 @@ mod tests {
 
         // Burst of 2 spends the full bucket; a third at the same instant is
         // discarded for budget, not for authenticity.
-        assert!(st.accept(&send(1), e, Direction::NodeToCollector, 0).is_ok());
-        assert!(st.accept(&send(2), e, Direction::NodeToCollector, 0).is_ok());
+        assert!(
+            st.accept(&send(1), e, Direction::NodeToCollector, 0)
+                .is_ok()
+        );
+        assert!(
+            st.accept(&send(2), e, Direction::NodeToCollector, 0)
+                .is_ok()
+        );
         assert_eq!(
-            st.accept(&send(3), e, Direction::NodeToCollector, 0).unwrap_err(),
+            st.accept(&send(3), e, Direction::NodeToCollector, 0)
+                .unwrap_err(),
             Error::RateLimited
         );
         assert_eq!(st.rate_limited_count(), 1);
@@ -590,13 +654,17 @@ mod tests {
         // (PROTOCOL.md 7.4: the offset was genuinely used), so replaying it
         // fails as a replay, not as a second rate-limit discard.
         assert_eq!(
-            st.accept(&send(3), e, Direction::NodeToCollector, 0).unwrap_err(),
+            st.accept(&send(3), e, Direction::NodeToCollector, 0)
+                .unwrap_err(),
             Error::Replay
         );
 
         // Waiting for the bucket to refill (10/sec => 100ms per token) admits
         // the next one.
-        assert!(st.accept(&send(4), e, Direction::NodeToCollector, 100).is_ok());
+        assert!(
+            st.accept(&send(4), e, Direction::NodeToCollector, 100)
+                .is_ok()
+        );
         assert_eq!(st.rate_limited_count(), 1);
     }
 
@@ -651,7 +719,8 @@ mod tests {
         assert!(clk.may_request_time(t + TIME_REQUEST_MAX_SECS));
 
         // Once time is recovered the node stops asking entirely.
-        clk.accept_time_announce(1000 * EPOCH_SECS as i64 + 5000, 0).unwrap();
+        clk.accept_time_announce(1000 * EPOCH_SECS as i64 + 5000, 0)
+            .unwrap();
         assert!(!clk.may_request_time(i64::MAX - 1));
     }
 
@@ -704,10 +773,15 @@ mod tests {
             1,
             e,
             10,
-            vec![Record::new(Format::None, 1, vec![0x01]), Record::new(Format::None, 2, vec![0x02])],
+            vec![
+                Record::new(Format::None, 1, vec![0x01]),
+                Record::new(Format::None, 2, vec![0x02]),
+            ],
         )
         .unwrap();
-        let w = dg.encode(&secret, e, Direction::NodeToCollector, MAX_DATAGRAM_IPV4).unwrap();
+        let w = dg
+            .encode(&secret, e, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
+            .unwrap();
         st.accept(&w, e, Direction::NodeToCollector, 0).unwrap();
 
         let s = st.stats();
@@ -729,16 +803,17 @@ mod tests {
         let e = 4000u32;
 
         // A bit-flip after encoding fails the MAC: step 7.
-        let mut tampered =
-            Datagram::number(CipherId::HmacSha256T32, 1, e, 10, 1, 5).unwrap().encode(
-                &secret,
-                e,
-                Direction::NodeToCollector,
-                MAX_DATAGRAM_IPV4,
-            ).unwrap();
+        let mut tampered = Datagram::number(CipherId::HmacSha256T32, 1, e, 10, 1, 5)
+            .unwrap()
+            .encode(&secret, e, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
+            .unwrap();
         let last = tampered.len() - 1;
         tampered[last] ^= 0x01;
-        assert_eq!(st.accept(&tampered, e, Direction::NodeToCollector, 0).unwrap_err(), Error::AuthFailed);
+        assert_eq!(
+            st.accept(&tampered, e, Direction::NodeToCollector, 0)
+                .unwrap_err(),
+            Error::AuthFailed
+        );
 
         // The same datagram sent twice is a replay on the second delivery:
         // step 8.
@@ -747,7 +822,10 @@ mod tests {
             .encode(&secret, e, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
             .unwrap();
         st.accept(&w, e, Direction::NodeToCollector, 0).unwrap();
-        assert_eq!(st.accept(&w, e, Direction::NodeToCollector, 0).unwrap_err(), Error::Replay);
+        assert_eq!(
+            st.accept(&w, e, Direction::NodeToCollector, 0).unwrap_err(),
+            Error::Replay
+        );
 
         let s = st.stats();
         assert_eq!(s.auth_failed, 1);
@@ -763,7 +841,10 @@ mod tests {
             secret: secret.clone(),
             cipher: CipherId::HmacSha256T32,
             layouts: vec![(Format::None as u8, 1)],
-            inbound_rate_limit: Some(RateLimit { per_sec: 10, burst: 1 }),
+            inbound_rate_limit: Some(RateLimit {
+                per_sec: 10,
+                burst: 1,
+            }),
         })
         .unwrap();
         let e = 5000u32;
@@ -773,8 +854,13 @@ mod tests {
                 .encode(&secret, e, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
                 .unwrap()
         };
-        st.accept(&send(1), e, Direction::NodeToCollector, 0).unwrap();
-        assert_eq!(st.accept(&send(2), e, Direction::NodeToCollector, 0).unwrap_err(), Error::RateLimited);
+        st.accept(&send(1), e, Direction::NodeToCollector, 0)
+            .unwrap();
+        assert_eq!(
+            st.accept(&send(2), e, Direction::NodeToCollector, 0)
+                .unwrap_err(),
+            Error::RateLimited
+        );
 
         let s = st.stats();
         assert_eq!(s.rate_limited, 1);
@@ -792,16 +878,25 @@ mod tests {
 
         // Shorter than the header: never even resolves a sender_id.
         assert_eq!(
-            c.accept(&[0u8; 3], e, Direction::NodeToCollector, 0).unwrap_err(),
+            c.accept(&[0u8; 3], e, Direction::NodeToCollector, 0)
+                .unwrap_err(),
             Error::TooShort
         );
 
         // Long enough, but sender_id 2 was never provisioned.
         let dg = Datagram::number(CipherId::HmacSha256T32, 2, e, 5, 1, 5).unwrap();
         let w = dg
-            .encode(&DeviceSecret::new([2u8; 32]), e, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
+            .encode(
+                &DeviceSecret::new([2u8; 32]),
+                e,
+                Direction::NodeToCollector,
+                MAX_DATAGRAM_IPV4,
+            )
             .unwrap();
-        assert_eq!(c.accept(&w, e, Direction::NodeToCollector, 0).unwrap_err(), Error::UnknownSender(2));
+        assert_eq!(
+            c.accept(&w, e, Direction::NodeToCollector, 0).unwrap_err(),
+            Error::UnknownSender(2)
+        );
 
         let s = c.stats();
         assert_eq!(s.too_short, 1);
@@ -820,7 +915,12 @@ mod tests {
         for id in [1u32, 2] {
             let dg = Datagram::number(CipherId::HmacSha256T32, id, e, 9, 1, 5).unwrap();
             let w = dg
-                .encode(&DeviceSecret::new([(id & 0xFF) as u8; 32]), e, Direction::NodeToCollector, MAX_DATAGRAM_IPV4)
+                .encode(
+                    &DeviceSecret::new([(id & 0xFF) as u8; 32]),
+                    e,
+                    Direction::NodeToCollector,
+                    MAX_DATAGRAM_IPV4,
+                )
                 .unwrap();
             c.accept(&w, e, Direction::NodeToCollector, 0).unwrap();
         }
