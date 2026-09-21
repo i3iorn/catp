@@ -50,6 +50,10 @@ path = "src/bin/vectors.rs"
 name = "catp-provision"
 path = "src/bin/provision.rs"
 
+[[bin]]
+name = "catp-conformance-iut"
+path = "src/bin/conformance_iut.rs"
+
 [dev-dependencies]
 criterion = "0.8.2"
 

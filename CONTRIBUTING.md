@@ -56,6 +56,12 @@ deliberately and commit both alongside your code change in the same PR.
 that discharges it — a second implementation should check its own suite
 against that table rather than re-deriving a checklist from §14.2's prose.
 
+`docs/CONFORMANCE_RUNNER.md` defines a subprocess contract for checking a
+second implementation against `docs/test-vectors.json` directly, plus
+`tools/run_conformance.py`, a stdlib-only driver for it — a second
+implementation does not need to write its own vector-parsing harness, only
+the JSON-Lines-in, `PASS`/`FAIL`-out loop the contract describes.
+
 `tests/vectors.rs` will fail otherwise, deliberately — that's the test
 catching wire-format drift, not a bug in the test.
 

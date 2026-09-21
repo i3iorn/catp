@@ -30,14 +30,13 @@ does not number them itself.
 | 15 | Simulated reboot mid-epoch: resumes past any prior offset | `pacer_survives_simulated_reboot` (src/lib.rs) |
 | 16 | Backward clock step mid-epoch: refuses to emit at or below the last offset | `pacer_rejects_backward_clock_step` (src/lib.rs) |
 | 17 | `TIME_ANNOUNCE` replay against a booting node | `replayed_time_announce_pins_but_cannot_rewind` (src/peer.rs) |
-| 18 | Cipher `0x03`: no two datagrams in one epoch/direction share a nonce | **Blocked on #33** — `0x03` returns `CipherUnimplemented`, so this property has nothing to test yet |
+| 18 | Cipher `0x03`: no two datagrams in one epoch/direction share a nonce | `chacha20poly1305_tag_depends_on_datagram_offset` (src/lib.rs): same key, same message, two `datagram_offset`s (hence two nonces per §7.2) produce distinct tags; the "cipher 0x03: nonce pair" vectors (`docs/test-vectors.json`/`.txt`, offsets 10 and 11) fix the same property in the frozen conformance data |
 | 19 | Cipher `0x04`: inbound rate limit enforced, exceeding it counted | `exceeding_the_inbound_limit_discards_authenticated_traffic_and_counts_it` (src/peer.rs), `rate_limit_is_enforced_through_the_collector` (tests/integration.rs) |
 
-Row 18 is the one genuine gap, and it isn't closeable here: it requires `0x03`
-to exist first (#33). Everything else in §14.2 has a test as of this audit —
-rows 7 and 9 did not before it (added alongside this document) and row 4's
-"both directions" property was true but unstated as such until this pass
-looked for it.
+Every row in §14.2 has a test as of this audit — rows 7 and 9 did not before
+it (added alongside this document), row 4's "both directions" property was
+true but unstated as such until this pass looked for it, and row 18 was
+blocked on #33 (cipher `0x03`) until that issue closed.
 
 ## Using this table
 
