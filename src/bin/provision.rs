@@ -121,15 +121,25 @@ fn cmd_generate(args: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    // Self-assignment collision check within this batch (PROTOCOL.md 4.4.1):
-    // the one check that's actually checkable at generation time, rather
-    // than against a fleet this tool has no visibility into.
+    // Self-assignment collision check within this batch (PROTOCOL.md 4.4.1),
+    // extended to the directory this batch writes into: an operator running
+    // `generate` a second time to grow a fleet must not have it silently
+    // overwrite an already-provisioned node's bundle -- `write_file` always
+    // truncates, so a collision here would replace a live device's secret
+    // with a fresh one it was never given, desynchronizing it with no
+    // warning. This is still not a check against a whole fleet's history
+    // this tool has no visibility into (PROTOCOL.md 4.4.1's >1,000-node
+    // tier needs that from the deployment itself), only against what is
+    // actually on disk right here.
     let mut seen = HashSet::with_capacity(count as usize);
     let mut bundles = Vec::with_capacity(count as usize);
     while bundles.len() < count as usize {
         let sender_id = random_sender_id();
         if !seen.insert(sender_id) {
             continue; // collision within this batch; resample
+        }
+        if out.join(format!("node-{sender_id:08x}.bundle")).exists() {
+            continue; // collision with an already-provisioned node; resample
         }
         bundles.push(Bundle {
             sender_id,
@@ -286,6 +296,44 @@ mod tests {
         // collision check).
         let ids: HashSet<_> = loaded.iter().map(|b| b.sender_id).collect();
         assert_eq!(ids.len(), 5);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn generate_run_twice_never_overwrites_an_earlier_batch() {
+        // An operator growing a fleet runs `generate` again into the same
+        // directory. The first batch's bundles -- and in particular their
+        // secrets -- must survive untouched; `write_file` always truncates,
+        // so a sender_id collision with an earlier run must be resampled
+        // away from, not written over.
+        let dir = std::env::temp_dir().join(format!("catp-provision-bin-regrow-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.to_string_lossy().into_owned();
+        let generate_into = |count: &str| {
+            cmd_generate(&[
+                "--count".into(),
+                count.into(),
+                "--cipher".into(),
+                "01".into(),
+                "--layouts".into(),
+                "01:01".into(),
+                "--out".into(),
+                out.clone(),
+            ])
+        };
+        assert_eq!(generate_into("5"), ExitCode::SUCCESS);
+        let first_batch = load_bundles_dir(&dir).unwrap();
+        assert_eq!(first_batch.len(), 5);
+
+        assert_eq!(generate_into("5"), ExitCode::SUCCESS);
+        let second_batch = load_bundles_dir(&dir).unwrap();
+        assert_eq!(second_batch.len(), 10, "second run must add, not replace");
+
+        // Every bundle from the first run is still present, byte-for-byte
+        // (same secret, not a freshly generated one under the same name).
+        for b in &first_batch {
+            assert!(second_batch.contains(b), "first batch bundle {:08x} was overwritten", b.sender_id);
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 

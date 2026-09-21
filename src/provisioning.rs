@@ -176,12 +176,22 @@ impl Bundle {
     /// against a shared umask leaving a device secret world-readable. Not a
     /// substitute for actual secure storage (PROTOCOL.md §15 leaves storage
     /// at rest out of scope, deliberately), just a floor.
+    ///
+    /// `mode(0o600)` on `OpenOptions` only sets permissions at *creation*
+    /// time (`O_CREAT`) -- if `path` already exists (e.g. `reissue`
+    /// overwriting an older bundle, or a directory shared with a tool that
+    /// used a looser umask), opening it with `truncate(true)` keeps
+    /// whatever permissions it already had. This explicitly `chmod`s the
+    /// open file descriptor to `0600` before writing, so an existing
+    /// world-readable bundle is tightened rather than silently left as is.
     pub fn write_file(&self, path: &Path) -> Result<(), ProvisionError> {
         #[cfg(unix)]
         {
-            use std::os::unix::fs::OpenOptionsExt;
-            let mut f = fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
             use std::io::Write;
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            let mut f =
+                fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
+            f.set_permissions(fs::Permissions::from_mode(0o600))?;
             f.write_all(self.to_text().as_bytes())?;
             Ok(())
         }
@@ -343,6 +353,27 @@ mod tests {
         let b = sample();
         b.write_file(&path).unwrap();
         assert_eq!(Bundle::read_file(&path).unwrap(), b);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_file_tightens_an_existing_worlds_readable_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("catp-provisioning-test-perm-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("node.bundle");
+        // Simulate a file that pre-existed with looser permissions -- e.g.
+        // left over from a different tool, or from before this hardening
+        // existed. `OpenOptions::mode()` only sets permissions at creation,
+        // so overwriting it must not leave them as they were.
+        std::fs::write(&path, "stale").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        sample().write_file(&path).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "existing file's permissions were not tightened");
         std::fs::remove_dir_all(&dir).ok();
     }
 
