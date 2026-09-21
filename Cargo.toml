@@ -7,6 +7,14 @@ resolver = "2"
 # `benches/`, `examples/`, and `fuzz/`'s existing relative paths and `../`
 # references keep working unchanged (issue #74).
 members = ["tools"]
+# `fuzz/` has its own `Cargo.toml` and its own committed `Cargo.lock`,
+# deliberately kept independent of this workspace's lockfile (see
+# `fuzz/README.md`) -- it depends on `catp` the same way any external
+# consumer would, via a plain path dependency, not workspace membership.
+# Cargo refuses to build a nested `Cargo.toml` it finds under a workspace
+# root unless that package is either a member or explicitly excluded; this
+# is the exclusion.
+exclude = ["fuzz"]
 
 [package]
 name = "catp"
