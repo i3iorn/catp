@@ -14,9 +14,9 @@
 //! meaningful output, not any single absolute figure. `docs/DEPLOYMENT.md`
 //! D2 records one concrete run for a memory-sizing worked example.
 
-use catp::wire::{decode, Datagram, PeerConfig};
+use catp::wire::{Datagram, PeerConfig, decode};
 use catp::*;
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 
 const SENDER_ID: u32 = 0x1234_5678;
 const EPOCH: u32 = 13_281_250;
@@ -61,9 +61,10 @@ fn bench_encode(c: &mut Criterion) {
             b.iter(|| number.encode(&s, EPOCH, DIR, MAX_DATAGRAM_IPV4).unwrap())
         });
         let message = message_datagram(cipher);
-        g.bench_function(format!("MESSAGE 1 record/16B, tag{}", cipher.tag_len()), |b| {
-            b.iter(|| message.encode(&s, EPOCH, DIR, MAX_DATAGRAM_IPV4).unwrap())
-        });
+        g.bench_function(
+            format!("MESSAGE 1 record/16B, tag{}", cipher.tag_len()),
+            |b| b.iter(|| message.encode(&s, EPOCH, DIR, MAX_DATAGRAM_IPV4).unwrap()),
+        );
     }
     g.finish();
 }
@@ -73,7 +74,9 @@ fn bench_decode_accept(c: &mut Criterion) {
     let mut g = c.benchmark_group("decode (accept)");
     for cipher in [CipherId::HmacSha256T64, CipherId::HmacSha256T32] {
         let peer_cfg = peer(cipher);
-        let wire = number_datagram(cipher).encode(&s, EPOCH, DIR, MAX_DATAGRAM_IPV4).unwrap();
+        let wire = number_datagram(cipher)
+            .encode(&s, EPOCH, DIR, MAX_DATAGRAM_IPV4)
+            .unwrap();
         g.bench_function(format!("NUMBER, tag{}", cipher.tag_len()), |b| {
             b.iter(|| {
                 let mut w = ReplayWindow::one_second();
@@ -125,5 +128,11 @@ fn bench_epoch_key(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_encode, bench_decode_accept, bench_decode_reject, bench_epoch_key);
+criterion_group!(
+    benches,
+    bench_encode,
+    bench_decode_accept,
+    bench_decode_reject,
+    bench_epoch_key
+);
 criterion_main!(benches);

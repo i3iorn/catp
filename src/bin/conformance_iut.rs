@@ -10,7 +10,7 @@
 //! python3 tools/run_conformance.py -- cargo run --quiet --bin catp-conformance-iut
 //! ```
 
-use catp::wire::{decode, decode_time_announce, decode_time_request, Datagram, PeerConfig};
+use catp::wire::{Datagram, PeerConfig, decode, decode_time_announce, decode_time_request};
 use catp::*;
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
@@ -34,7 +34,11 @@ mod tinyjson {
     #[cfg(test)]
     pub fn parse_array_of_objects(s: &str) -> Vec<HashMap<String, String>> {
         let mut chars = s.trim().char_indices().peekable();
-        assert_eq!(chars.next().map(|(_, c)| c), Some('['), "expected top-level array");
+        assert_eq!(
+            chars.next().map(|(_, c)| c),
+            Some('['),
+            "expected top-level array"
+        );
         let mut out = Vec::new();
         loop {
             skip_ws(&mut chars);
@@ -51,7 +55,11 @@ mod tinyjson {
     }
 
     fn parse_object_from(chars: &mut Chars) -> HashMap<String, String> {
-        assert_eq!(chars.next().map(|(_, c)| c), Some('{'), "expected a JSON object");
+        assert_eq!(
+            chars.next().map(|(_, c)| c),
+            Some('{'),
+            "expected a JSON object"
+        );
         let mut map = HashMap::new();
         loop {
             skip_ws(chars);
@@ -116,28 +124,38 @@ mod tinyjson {
 }
 
 fn unhex(s: &str) -> Vec<u8> {
-    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+        .collect()
 }
 
 /// All layouts permissive: this IUT checks the codec, not a deployment's
 /// provisioning (mirrors `tests/vectors.rs`).
 fn permissive_layouts() -> Vec<(u8, u8)> {
-    (1u8..=6).flat_map(|f| (0u8..=255).map(move |s| (f, s))).collect()
+    (1u8..=6)
+        .flat_map(|f| (0u8..=255).map(move |s| (f, s)))
+        .collect()
 }
 
 fn check_accept(m: &HashMap<String, String>) -> Result<(), String> {
     let secret = DeviceSecret::new(
-        unhex(&m["device_secret"]).try_into().map_err(|_| "device_secret not 32 bytes".to_string())?,
+        unhex(&m["device_secret"])
+            .try_into()
+            .map_err(|_| "device_secret not 32 bytes".to_string())?,
     );
     let sender_id = u32::from_str_radix(&m["sender_id"], 16).map_err(|e| e.to_string())?;
-    let epoch: u32 = m["epoch_id"].parse().map_err(|_| "bad epoch_id".to_string())?;
+    let epoch: u32 = m["epoch_id"]
+        .parse()
+        .map_err(|_| "bad epoch_id".to_string())?;
     let dir = match unhex(&m["direction"]).first() {
         Some(0x00) => Direction::NodeToCollector,
         Some(_) => Direction::CollectorToNode,
         None => return Err("missing direction".into()),
     };
     let cipher_byte = *unhex(&m["cipher_id"]).first().ok_or("missing cipher_id")?;
-    let cipher = CipherId::from_u8(cipher_byte).ok_or_else(|| format!("unknown cipher_id {cipher_byte:#04x}"))?;
+    let cipher = CipherId::from_u8(cipher_byte)
+        .ok_or_else(|| format!("unknown cipher_id {cipher_byte:#04x}"))?;
     let wire = unhex(&m["wire"]);
 
     let peer = PeerConfig {
@@ -148,9 +166,13 @@ fn check_accept(m: &HashMap<String, String>) -> Result<(), String> {
         inbound_rate_limit: None,
     };
     let mut window = ReplayWindow::one_second();
-    let acc = decode(&wire, &peer, epoch, dir, &mut window).map_err(|e| format!("decode rejected: {e:?}"))?;
+    let acc = decode(&wire, &peer, epoch, dir, &mut window)
+        .map_err(|e| format!("decode rejected: {e:?}"))?;
 
-    let again = acc.datagram.encode(&secret, epoch, dir, u16::MAX as usize).map_err(|e| format!("reencode failed: {e:?}"))?;
+    let again = acc
+        .datagram
+        .encode(&secret, epoch, dir, u16::MAX as usize)
+        .map_err(|e| format!("reencode failed: {e:?}"))?;
     if again != wire {
         return Err("reencode mismatch".into());
     }
@@ -159,13 +181,17 @@ fn check_accept(m: &HashMap<String, String>) -> Result<(), String> {
 
 fn check_accept_time_request(m: &HashMap<String, String>) -> Result<(), String> {
     let secret = DeviceSecret::new(
-        unhex(&m["device_secret"]).try_into().map_err(|_| "device_secret not 32 bytes".to_string())?,
+        unhex(&m["device_secret"])
+            .try_into()
+            .map_err(|_| "device_secret not 32 bytes".to_string())?,
     );
     let sender_id = u32::from_str_radix(&m["sender_id"], 16).map_err(|e| e.to_string())?;
     let wire = unhex(&m["wire"]);
 
-    decode_time_request(&wire, sender_id, &secret).map_err(|e| format!("decode rejected: {e:?}"))?;
-    let again = Datagram::time_request(sender_id, &secret).map_err(|e| format!("reencode failed: {e:?}"))?;
+    decode_time_request(&wire, sender_id, &secret)
+        .map_err(|e| format!("decode rejected: {e:?}"))?;
+    let again = Datagram::time_request(sender_id, &secret)
+        .map_err(|e| format!("reencode failed: {e:?}"))?;
     if again != wire {
         return Err("reencode mismatch".into());
     }
@@ -174,18 +200,23 @@ fn check_accept_time_request(m: &HashMap<String, String>) -> Result<(), String> 
 
 fn check_accept_time_announce(m: &HashMap<String, String>) -> Result<(), String> {
     let secret = DeviceSecret::new(
-        unhex(&m["device_secret"]).try_into().map_err(|_| "device_secret not 32 bytes".to_string())?,
+        unhex(&m["device_secret"])
+            .try_into()
+            .map_err(|_| "device_secret not 32 bytes".to_string())?,
     );
     let sender_id = u32::from_str_radix(&m["sender_id"], 16).map_err(|e| e.to_string())?;
     let wire = unhex(&m["wire"]);
-    let asserted_time: i64 = m["asserted_time"].parse().map_err(|_| "bad asserted_time".to_string())?;
+    let asserted_time: i64 = m["asserted_time"]
+        .parse()
+        .map_err(|_| "bad asserted_time".to_string())?;
 
-    let got = decode_time_announce(&wire, sender_id, &secret).map_err(|e| format!("decode rejected: {e:?}"))?;
+    let got = decode_time_announce(&wire, sender_id, &secret)
+        .map_err(|e| format!("decode rejected: {e:?}"))?;
     if got != asserted_time {
         return Err("wrong outcome: asserted_time mismatch".into());
     }
-    let again =
-        Datagram::time_announce(sender_id, got, &secret).map_err(|e| format!("reencode failed: {e:?}"))?;
+    let again = Datagram::time_announce(sender_id, got, &secret)
+        .map_err(|e| format!("reencode failed: {e:?}"))?;
     if again != wire {
         return Err("reencode mismatch".into());
     }
@@ -262,9 +293,18 @@ mod tests {
 
     #[test]
     fn number_payload_outcomes_match() {
-        assert_eq!(verdict(r#"{"kind": "number_payload", "payload": "010000", "outcome": "accept"}"#), "PASS");
-        assert_eq!(verdict(r#"{"kind": "number_payload", "payload": "000001", "outcome": "reject"}"#), "PASS");
-        assert!(verdict(r#"{"kind": "number_payload", "payload": "000001", "outcome": "accept"}"#).starts_with("FAIL"));
+        assert_eq!(
+            verdict(r#"{"kind": "number_payload", "payload": "010000", "outcome": "accept"}"#),
+            "PASS"
+        );
+        assert_eq!(
+            verdict(r#"{"kind": "number_payload", "payload": "000001", "outcome": "reject"}"#),
+            "PASS"
+        );
+        assert!(
+            verdict(r#"{"kind": "number_payload", "payload": "000001", "outcome": "accept"}"#)
+                .starts_with("FAIL")
+        );
     }
 
     #[test]
@@ -278,6 +318,10 @@ mod tests {
             let v = verdict_of(m);
             assert_eq!(v, "PASS", "vector failed: {m:?} -> {v}");
         }
-        assert!(objects.len() >= 30, "only checked {} vectors", objects.len());
+        assert!(
+            objects.len() >= 30,
+            "only checked {} vectors",
+            objects.len()
+        );
     }
 }

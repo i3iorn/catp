@@ -42,24 +42,32 @@ impl JsonVectors {
     /// `fields` are `(key, already-JSON-encoded value)` pairs, in the order
     /// they should appear in the object.
     fn push(&mut self, fields: &[(&str, String)]) {
-        let body: Vec<String> =
-            fields.iter().map(|(k, v)| format!("{}: {v}", json_str(k))).collect();
+        let body: Vec<String> = fields
+            .iter()
+            .map(|(k, v)| format!("{}: {v}", json_str(k)))
+            .collect();
         self.0.push(format!("    {{ {} }}", body.join(", ")));
     }
 
     fn write(&self, path: &str) {
-        let contents = format!(
-            "[\n{}\n]\n",
-            self.0.join(",\n")
-        );
+        let contents = format!("[\n{}\n]\n", self.0.join(",\n"));
         std::fs::write(path, contents).expect("failed to write JSON vector mirror");
     }
 }
 
 /// One accepted vector: inputs, derived key, and the exact bytes on the wire.
 /// Prints the human-readable block and records the same fields into `json`.
-fn accept(json: &mut JsonVectors, name: &str, secret: &DeviceSecret, epoch: u32, dir: Direction, dg: &Datagram) {
-    let wire = dg.encode(secret, epoch, dir, 65535).expect("vector must encode");
+fn accept(
+    json: &mut JsonVectors,
+    name: &str,
+    secret: &DeviceSecret,
+    epoch: u32,
+    dir: Direction,
+    dg: &Datagram,
+) {
+    let wire = dg
+        .encode(secret, epoch, dir, 65535)
+        .expect("vector must encode");
     let key = secret.epoch_key(dg.sender_id, epoch, dir);
     let auth_header = dg.auth_header(epoch);
     println!("# {name}");
@@ -148,8 +156,14 @@ fn main() {
             &s,
             epoch,
             n2c,
-            &Datagram::series(cipher, id, epoch, 0x02, &[(4200, 2350), (4450, 2360), (4900, 2355)])
-                .unwrap(),
+            &Datagram::series(
+                cipher,
+                id,
+                epoch,
+                0x02,
+                &[(4200, 2350), (4450, 2360), (4900, 2355)],
+            )
+            .unwrap(),
         );
         accept(
             &mut json,
@@ -239,7 +253,11 @@ fn main() {
                 id,
                 epoch,
                 600,
-                &Control::EpochAnnounce { target_epoch: epoch + 1 }.encode().unwrap(),
+                &Control::EpochAnnounce {
+                    target_epoch: epoch + 1,
+                }
+                .encode()
+                .unwrap(),
             )
             .unwrap(),
         );
@@ -282,7 +300,15 @@ fn main() {
         &s,
         epoch,
         n2c,
-        &Datagram::number(CipherId::HmacSha256T32, id, epoch, TICKS_PER_EPOCH - 1, SCALE_MIN, 10).unwrap(),
+        &Datagram::number(
+            CipherId::HmacSha256T32,
+            id,
+            epoch,
+            TICKS_PER_EPOCH - 1,
+            SCALE_MIN,
+            10,
+        )
+        .unwrap(),
     );
     accept(
         &mut json,
@@ -346,7 +372,14 @@ fn main() {
         &s,
         epoch,
         n2c,
-        &Datagram::series(CipherId::HmacSha256T32, id, epoch, SCALE_MIN, &[(5, 0), (6, 1)]).unwrap(),
+        &Datagram::series(
+            CipherId::HmacSha256T32,
+            id,
+            epoch,
+            SCALE_MIN,
+            &[(5, 0), (6, 1)],
+        )
+        .unwrap(),
     );
     accept(
         &mut json,
@@ -354,8 +387,14 @@ fn main() {
         &s,
         epoch,
         n2c,
-        &Datagram::series(CipherId::HmacSha256T32, id, epoch, SCALE_MIN, &[(6, 0), (6 + 65_535, 1)])
-            .unwrap(),
+        &Datagram::series(
+            CipherId::HmacSha256T32,
+            id,
+            epoch,
+            SCALE_MIN,
+            &[(6, 0), (6 + 65_535, 1)],
+        )
+        .unwrap(),
     );
     accept(
         &mut json,
@@ -364,7 +403,8 @@ fn main() {
         epoch,
         n2c,
         &{
-            let mut d = Datagram::number(CipherId::HmacSha256T32, id, epoch, 8, SCALE_MIN, 10).unwrap();
+            let mut d =
+                Datagram::number(CipherId::HmacSha256T32, id, epoch, 8, SCALE_MIN, 10).unwrap();
             d.reserved = 0x1F;
             d
         },
@@ -403,7 +443,10 @@ fn main() {
     println!("wire_len     {}", req.len());
     println!();
     json.push(&[
-        ("name", json_str("TIME_REQUEST, cipher 0x01 mandatory, node-to-collector time_key")),
+        (
+            "name",
+            json_str("TIME_REQUEST, cipher 0x01 mandatory, node-to-collector time_key"),
+        ),
         ("kind", json_str("accept_time_request")),
         ("device_secret", json_str(&hex(s.expose_secret()))),
         ("sender_id", json_str(&format!("{id:08x}"))),
@@ -427,7 +470,10 @@ fn main() {
     println!("wire_len     {}", wire.len());
     println!();
     json.push(&[
-        ("name", json_str("TIME_ANNOUNCE, cipher 0x01 mandatory, collector-to-node time_key")),
+        (
+            "name",
+            json_str("TIME_ANNOUNCE, cipher 0x01 mandatory, collector-to-node time_key"),
+        ),
         ("kind", json_str("accept_time_announce")),
         ("device_secret", json_str(&hex(s.expose_secret()))),
         ("sender_id", json_str(&format!("{id:08x}"))),

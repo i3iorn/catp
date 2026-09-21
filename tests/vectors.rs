@@ -8,12 +8,15 @@
 //! Regenerate deliberately with:
 //!     cargo run --bin catp-vectors > docs/test-vectors.txt
 
-use catp::wire::{decode, decode_time_announce, decode_time_request, Datagram, PeerConfig};
+use catp::wire::{Datagram, PeerConfig, decode, decode_time_announce, decode_time_request};
 use catp::*;
 use std::collections::HashMap;
 
 fn unhex(s: &str) -> Vec<u8> {
-    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+        .collect()
 }
 
 /// A minimal JSON parser, only as general as `docs/test-vectors.json` needs:
@@ -25,7 +28,11 @@ mod tinyjson {
 
     pub fn parse_array_of_objects(s: &str) -> Vec<HashMap<String, String>> {
         let mut chars = s.trim().char_indices().peekable();
-        assert_eq!(chars.next().map(|(_, c)| c), Some('['), "expected top-level array");
+        assert_eq!(
+            chars.next().map(|(_, c)| c),
+            Some('['),
+            "expected top-level array"
+        );
         let mut out = Vec::new();
         loop {
             skip_ws(&mut chars, s);
@@ -145,8 +152,14 @@ fn scalar_lines(key: &str) -> Vec<String> {
 #[test]
 fn vector_file_is_present_and_substantial() {
     let b = blocks();
-    let accepts = b.iter().filter(|m| m.get("kind").map(|k| k == "accept").unwrap_or(false)).count();
-    assert!(accepts >= 20, "only {accepts} accept vectors; 14.1 asks for one per msg_type per cipher");
+    let accepts = b
+        .iter()
+        .filter(|m| m.get("kind").map(|k| k == "accept").unwrap_or(false))
+        .count();
+    assert!(
+        accepts >= 20,
+        "only {accepts} accept vectors; 14.1 asks for one per msg_type per cipher"
+    );
 }
 
 /// Every `accept` vector must decode, and re-encoding must reproduce it byte
@@ -168,7 +181,11 @@ fn every_accept_vector_verifies_and_reencodes() {
         let cipher = CipherId::from_u8(unhex(&m["cipher_id"])[0]).unwrap();
         let wire = unhex(&m["wire"]);
 
-        assert_eq!(wire.len(), m["wire_len"].parse::<usize>().unwrap(), "wire_len mismatch");
+        assert_eq!(
+            wire.len(),
+            m["wire_len"].parse::<usize>().unwrap(),
+            "wire_len mismatch"
+        );
 
         // The published epoch_key and auth_header must match what we derive.
         assert_eq!(
@@ -183,7 +200,9 @@ fn every_accept_vector_verifies_and_reencodes() {
             sender_id,
             secret: secret.clone(),
             cipher,
-            layouts: (1u8..=6).flat_map(|f| (0u8..=255).map(move |s| (f, s))).collect(),
+            layouts: (1u8..=6)
+                .flat_map(|f| (0u8..=255).map(move |s| (f, s)))
+                .collect(),
             inbound_rate_limit: None, // decode() called directly; bypasses PeerState
         };
         let mut w = ReplayWindow::one_second();
@@ -194,7 +213,10 @@ fn every_accept_vector_verifies_and_reencodes() {
         assert_eq!(acc.epoch_id, epoch);
         assert_eq!(acc.datagram_offset, m["offset"].parse::<u32>().unwrap());
         assert_eq!(acc.datagram.msg_type, unhex(&m["msg_type"])[0]);
-        assert_eq!(acc.datagram.auth_header(epoch).to_vec(), unhex(&m["auth_header"]));
+        assert_eq!(
+            acc.datagram.auth_header(epoch).to_vec(),
+            unhex(&m["auth_header"])
+        );
 
         // Re-encode and compare byte for byte.
         let again = acc
@@ -217,7 +239,11 @@ fn reserved_bit_vector_is_ignored_not_rejected() {
         .expect("reserved-bits vector missing");
     let wire = unhex(&m["wire"]);
     // Byte 2 holds reserved in its high 5 bits.
-    assert_eq!(wire[2] >> 3, 0x1F, "vector should have all reserved bits set");
+    assert_eq!(
+        wire[2] >> 3,
+        0x1F,
+        "vector should have all reserved bits set"
+    );
 
     let secret = DeviceSecret::new(unhex(&m["device_secret"]).try_into().unwrap());
     let peer = PeerConfig {
@@ -228,8 +254,14 @@ fn reserved_bit_vector_is_ignored_not_rejected() {
         inbound_rate_limit: None, // decode() called directly; bypasses PeerState
     };
     let mut w = ReplayWindow::one_second();
-    let acc = decode(&wire, &peer, m["epoch_id"].parse().unwrap(), Direction::NodeToCollector, &mut w)
-        .expect("reserved bits must not cause rejection");
+    let acc = decode(
+        &wire,
+        &peer,
+        m["epoch_id"].parse().unwrap(),
+        Direction::NodeToCollector,
+        &mut w,
+    )
+    .expect("reserved bits must not cause rejection");
     assert_eq!(acc.datagram.number_value(), Some((1, 10))); // 10 * 10^-1 = 1.0
 }
 
@@ -245,7 +277,9 @@ fn time_announce_vector_verifies() {
     let wire = unhex(&m["wire"]);
 
     assert_eq!(
-        secret.time_key(sender_id, Direction::CollectorToNode).to_vec(),
+        secret
+            .time_key(sender_id, Direction::CollectorToNode)
+            .to_vec(),
         unhex(&m["time_key"]),
         "collector-to-node time_key drifted"
     );
@@ -253,7 +287,10 @@ fn time_announce_vector_verifies() {
     assert_eq!(got, m["asserted_time"].parse::<i64>().unwrap());
 
     // And re-encoding reproduces it.
-    assert_eq!(Datagram::time_announce(sender_id, got, &secret).unwrap(), wire);
+    assert_eq!(
+        Datagram::time_announce(sender_id, got, &secret).unwrap(),
+        wire
+    );
 }
 
 /// The TIME_REQUEST vector verifies under the node-to-collector key, and must
@@ -269,7 +306,9 @@ fn time_request_vector_verifies_and_is_directional() {
     let wire = unhex(&m["wire"]);
 
     assert_eq!(
-        secret.time_key(sender_id, Direction::NodeToCollector).to_vec(),
+        secret
+            .time_key(sender_id, Direction::NodeToCollector)
+            .to_vec(),
         unhex(&m["time_key"]),
         "node-to-collector time_key drifted"
     );
@@ -296,7 +335,10 @@ fn number_grammar_matches_the_vectors() {
         assert!(validate_number(&unhex(l)).is_ok(), "{l} should be accepted");
     }
     for l in &bad {
-        assert!(validate_number(&unhex(l)).is_err(), "{l} should be rejected");
+        assert!(
+            validate_number(&unhex(l)).is_err(),
+            "{l} should be rejected"
+        );
     }
 }
 
@@ -321,7 +363,9 @@ fn every_vector_is_tamper_evident() {
             sender_id,
             secret,
             cipher,
-            layouts: (1u8..=6).flat_map(|f| (0u8..=255).map(move |s| (f, s))).collect(),
+            layouts: (1u8..=6)
+                .flat_map(|f| (0u8..=255).map(move |s| (f, s)))
+                .collect(),
             inbound_rate_limit: None, // decode() called directly; bypasses PeerState
         };
         // One flip per byte is enough breadth here; wire.rs flips every bit.
@@ -349,9 +393,15 @@ fn json_mirror_matches_the_text_vectors() {
         .expect("docs/test-vectors.json missing; run `cargo run --bin catp-vectors`");
     let json_objects = tinyjson::parse_array_of_objects(&json_text);
 
-    let text_accepts: Vec<_> =
-        blocks().into_iter().filter(|m| m.get("kind").map(String::as_str) == Some("accept")).collect();
-    assert!(text_accepts.len() >= 20, "only {} accept blocks in the text file", text_accepts.len());
+    let text_accepts: Vec<_> = blocks()
+        .into_iter()
+        .filter(|m| m.get("kind").map(String::as_str) == Some("accept"))
+        .collect();
+    assert!(
+        text_accepts.len() >= 20,
+        "only {} accept blocks in the text file",
+        text_accepts.len()
+    );
 
     let json_accepts: Vec<_> = json_objects
         .iter()

@@ -223,7 +223,10 @@ pub enum Error {
     BadMsgType(u8),
     UnknownSender(u32),
     /// `cipher_id` differs from the suite configured for this peer.
-    CipherMismatch { got: u8, want: u8 },
+    CipherMismatch {
+        got: u8,
+        want: u8,
+    },
     CipherUnimplemented(u8),
     /// `epoch_low` did not reconstruct within the acceptance window.
     EpochOutOfWindow,
@@ -242,9 +245,15 @@ pub enum Error {
     /// `SERIES` payload violates the fixed layout of PROTOCOL.md 6.9.
     BadSeries(&'static str),
     /// `EPOCH_ANNOUNCE` at or below the highest accepted (PROTOCOL.md 9.4).
-    EpochRollback { got: u32, hi: u32 },
+    EpochRollback {
+        got: u32,
+        hi: u32,
+    },
     /// `TIME_ANNOUNCE` at or below the persisted floor (PROTOCOL.md 11.4).
-    TimeRollback { asserted: i64, floor: i64 },
+    TimeRollback {
+        asserted: i64,
+        floor: i64,
+    },
     /// `TIME_ANNOUNCE` arrived at a node whose clock is already set.
     ClockAlreadyValid,
     NoClock,
@@ -268,7 +277,11 @@ pub fn scale_is_valid(scale: u8) -> bool {
 /// (PROTOCOL.md 6.3.1). For display only; the wire value is the
 /// `(scale, mantissa)` pair, not this string.
 pub fn format_scaled(scale: u8, mantissa: i16) -> String {
-    format!("{:.*}", scale as usize, mantissa as f64 / 10f64.powi(scale as i32))
+    format!(
+        "{:.*}",
+        scale as usize,
+        mantissa as f64 / 10f64.powi(scale as i32)
+    )
 }
 
 /// Validate and decode a `NUMBER` payload (PROTOCOL.md 6.3): exactly
@@ -326,9 +339,12 @@ pub fn validate_series(p: &[u8], anchor_offset: u32) -> Result<(u8, Vec<(u32, i1
         if delta == 0 {
             return Err(Error::BadSeries("delta must be at least 1 tick"));
         }
-        cum = cum.checked_add(delta as u32).filter(|&c| c < TICKS_PER_EPOCH).ok_or(
-            Error::BadSeries("reading's instant crosses the epoch boundary"),
-        )?;
+        cum = cum
+            .checked_add(delta as u32)
+            .filter(|&c| c < TICKS_PER_EPOCH)
+            .ok_or(Error::BadSeries(
+                "reading's instant crosses the epoch boundary",
+            ))?;
         let value = i16::from_be_bytes([entry[2], entry[3]]);
         readings.push((cum, value));
     }
@@ -387,7 +403,8 @@ impl DeviceSecret {
         info.extend_from_slice(&epoch_id.to_be_bytes());
         info.push(dir as u8);
         let mut okm = [0u8; 32];
-        hk.expand(&info, &mut okm).expect("32 is a valid HKDF length");
+        hk.expand(&info, &mut okm)
+            .expect("32 is a valid HKDF length");
         Zeroizing::new(okm)
     }
 
@@ -403,7 +420,8 @@ impl DeviceSecret {
         info.extend_from_slice(&sender_id.to_be_bytes());
         info.push(direction as u8);
         let mut okm = [0u8; 32];
-        hk.expand(&info, &mut okm).expect("32 is a valid HKDF length");
+        hk.expand(&info, &mut okm)
+            .expect("32 is a valid HKDF length");
         Zeroizing::new(okm)
     }
 }
@@ -413,7 +431,12 @@ impl DeviceSecret {
 /// its nonce from it (PROTOCOL.md 7.2); every other suite ignores it. Callers
 /// with no real offset (e.g. `TIME_ANNOUNCE`/`TIME_REQUEST`, pinned to `0x01`)
 /// may pass `0`.
-pub fn mac(cipher: CipherId, key: &[u8; 32], msg: &[u8], datagram_offset: u32) -> Result<Vec<u8>, Error> {
+pub fn mac(
+    cipher: CipherId,
+    key: &[u8; 32],
+    msg: &[u8],
+    datagram_offset: u32,
+) -> Result<Vec<u8>, Error> {
     if !cipher.implemented() {
         return Err(Error::CipherUnimplemented(cipher as u8));
     }
@@ -526,8 +549,15 @@ pub struct ReplayWindow {
 
 impl ReplayWindow {
     pub fn new(entries: u32) -> Self {
-        assert!(entries > 0 && entries.is_multiple_of(64), "entries must be a positive multiple of 64");
-        Self { high: None, bits: vec![0; (entries / 64) as usize], entries }
+        assert!(
+            entries > 0 && entries.is_multiple_of(64),
+            "entries must be a positive multiple of 64"
+        );
+        Self {
+            high: None,
+            bits: vec![0; (entries / 64) as usize],
+            entries,
+        }
     }
 
     /// One second of tolerance at the specified tick rate.
@@ -630,7 +660,10 @@ pub struct RateLimit {
 }
 
 impl RateLimit {
-    pub const RECOMMENDED_DEFAULT: RateLimit = RateLimit { per_sec: 128, burst: 128 };
+    pub const RECOMMENDED_DEFAULT: RateLimit = RateLimit {
+        per_sec: 128,
+        burst: 128,
+    };
 }
 
 /// Token bucket implementing one [`RateLimit`].
@@ -673,7 +706,12 @@ pub struct InboundLimiter {
 impl InboundLimiter {
     pub fn new(limit: RateLimit) -> Self {
         let capacity_micro = (limit.burst.max(1) as u64) * 1_000_000;
-        Self { per_sec: limit.per_sec, capacity_micro, tokens_micro: capacity_micro, last_ms: 0 }
+        Self {
+            per_sec: limit.per_sec,
+            capacity_micro,
+            tokens_micro: capacity_micro,
+            last_ms: 0,
+        }
     }
 
     /// Attempt to spend one token at `now_ms`, a caller-supplied monotonic
@@ -683,7 +721,9 @@ impl InboundLimiter {
     pub fn try_acquire(&mut self, now_ms: u64) -> bool {
         let elapsed_ms = now_ms.saturating_sub(self.last_ms);
         self.last_ms = now_ms;
-        let refill = (self.per_sec as u64).saturating_mul(1000).saturating_mul(elapsed_ms);
+        let refill = (self.per_sec as u64)
+            .saturating_mul(1000)
+            .saturating_mul(elapsed_ms);
         self.tokens_micro = (self.tokens_micro + refill).min(self.capacity_micro);
         if self.tokens_micro >= 1_000_000 {
             self.tokens_micro -= 1_000_000;
@@ -713,7 +753,10 @@ mod tests {
         let mut p = Pacer::new();
         let (_, a) = p.claim(1000, 500_000_000).unwrap();
         // NTP steps the clock back within the same epoch.
-        assert!(matches!(p.claim(1000, 100_000_000), Err(Error::OffsetReuse(_))));
+        assert!(matches!(
+            p.claim(1000, 100_000_000),
+            Err(Error::OffsetReuse(_))
+        ));
         // And recovers once the clock passes where it was.
         let (_, b) = p.claim(1000, 900_000_000).unwrap();
         assert!(b > a);
@@ -758,7 +801,11 @@ mod tests {
         assert_eq!(reconstruct_epoch(100, (99 & 0xF) as u8), Some(99));
         // 4 bits reject drift out to 15 epochs before aliasing (PROTOCOL.md 9.3).
         for back in 2..=15u32 {
-            assert_eq!(reconstruct_epoch(100, ((100 - back) & 0xF) as u8), None, "back={back}");
+            assert_eq!(
+                reconstruct_epoch(100, ((100 - back) & 0xF) as u8),
+                None,
+                "back={back}"
+            );
         }
         // At 16 it aliases onto `local`; the MAC over the full epoch_id rejects it.
         assert_eq!(reconstruct_epoch(100, ((100 - 16) & 0xF) as u8), Some(100));
@@ -867,7 +914,10 @@ mod tests {
             for bit in 0..8u8 {
                 let mut b = a;
                 b[byte] ^= 1 << bit;
-                assert!(!ct_eq(&a, &b), "flip at byte {byte} bit {bit} compared equal");
+                assert!(
+                    !ct_eq(&a, &b),
+                    "flip at byte {byte} bit {bit} compared equal"
+                );
             }
         }
     }
@@ -887,7 +937,10 @@ mod tests {
         let ta = s.time_key(1, Direction::CollectorToNode);
         assert_ne!(a, tq);
         assert_ne!(a, ta);
-        assert_ne!(tq, ta, "TIME_REQUEST and TIME_ANNOUNCE must not share a key");
+        assert_ne!(
+            tq, ta,
+            "TIME_REQUEST and TIME_ANNOUNCE must not share a key"
+        );
     }
 
     #[test]
@@ -924,11 +977,20 @@ mod tests {
         // defined range.
         for bad_scale in [0x00u8, 0x08] {
             let p = [bad_scale, 0x00, 0x01];
-            assert!(validate_number(&p).is_err(), "scale {bad_scale:#04x} should be invalid");
+            assert!(
+                validate_number(&p).is_err(),
+                "scale {bad_scale:#04x} should be invalid"
+            );
         }
         // Only exactly 3 bytes is legal.
-        assert!(validate_number(&[0x02, 0x00]).is_err(), "2 bytes should be invalid");
-        assert!(validate_number(&[0x02, 0x00, 0x01, 0x00]).is_err(), "4 bytes should be invalid");
+        assert!(
+            validate_number(&[0x02, 0x00]).is_err(),
+            "2 bytes should be invalid"
+        );
+        assert!(
+            validate_number(&[0x02, 0x00, 0x01, 0x00]).is_err(),
+            "4 bytes should be invalid"
+        );
     }
 
     #[test]

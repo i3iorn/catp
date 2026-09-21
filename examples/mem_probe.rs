@@ -21,7 +21,8 @@ use catp::*;
 use std::fs;
 
 fn rss_kb() -> u64 {
-    let status = fs::read_to_string("/proc/self/status").expect("Linux-only: reads /proc/self/status");
+    let status =
+        fs::read_to_string("/proc/self/status").expect("Linux-only: reads /proc/self/status");
     for line in status.lines() {
         if let Some(rest) = line.strip_prefix("VmRSS:") {
             return rest.trim().trim_end_matches(" kB").trim().parse().unwrap();

@@ -93,8 +93,8 @@ growing that list is a real cost each time, not a free action.
   repository's lock file, so the versions actually tested here and the
   versions a consumer's Cargo resolves can differ.
 - **`-Z minimal-versions` build** (nightly-only Cargo flag; `minimal-versions`
-  job in CI, `continue-on-error: true` like `fmt` since it needs nightly and
-  a floor failure here is a real finding, not a merge blocker on its own) —
+  job in CI, `continue-on-error: true` since it needs nightly and a floor
+  failure here is a real finding, not a merge blocker on its own) —
   resolves every dependency to the *lowest* version each `Cargo.toml`
   requirement string permits, so a declared floor like `hmac = "0.13"` is
   checked against an actual `0.13.0` build rather than assumed compatible

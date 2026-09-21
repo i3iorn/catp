@@ -15,8 +15,8 @@
 //! centralized `sender_id` registry for >10,000-node fleets (§4.4.1's third
 //! tier) -- a real registry service is a different project.
 
-use catp::provisioning::Bundle;
 use catp::CipherId;
+use catp::provisioning::Bundle;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -81,12 +81,15 @@ fn cmd_generate(args: &[String]) -> ExitCode {
     while i < args.len() {
         match args[i].as_str() {
             "--count" => {
-                count = Some(args.get(i + 1).unwrap_or_else(|| usage()).parse::<u32>().unwrap_or_else(
-                    |_| {
-                        eprintln!("error: --count is not a number");
-                        std::process::exit(2);
-                    },
-                ));
+                count = Some(
+                    args.get(i + 1)
+                        .unwrap_or_else(|| usage())
+                        .parse::<u32>()
+                        .unwrap_or_else(|_| {
+                            eprintln!("error: --count is not a number");
+                            std::process::exit(2);
+                        }),
+                );
                 i += 2;
             }
             "--cipher" => {
@@ -181,7 +184,14 @@ fn cmd_inspect(args: &[String]) -> ExitCode {
     };
     println!("sender_id     {:08x}", bundle.sender_id);
     if reveal {
-        println!("device_secret {}", bundle.device_secret.iter().map(|b| format!("{b:02x}")).collect::<String>());
+        println!(
+            "device_secret {}",
+            bundle
+                .device_secret
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        );
     } else {
         println!("device_secret <hidden, pass --reveal-secret to print>");
     }
@@ -228,7 +238,10 @@ fn cmd_reissue(args: &[String]) -> ExitCode {
     // update the node, out of band, before it transmits again. This tool
     // does not perform that cutover -- CATP has no provisioning channel to
     // automate it over (§15) -- it only produces the new bundle.
-    let reissued = Bundle { device_secret: random_secret(), ..previous };
+    let reissued = Bundle {
+        device_secret: random_secret(),
+        ..previous
+    };
     if let Err(e) = reissued.write_file(&out) {
         eprintln!("error: writing {}: {e}", out.display());
         return ExitCode::FAILURE;
@@ -260,7 +273,10 @@ mod tests {
 
     #[test]
     fn parse_layouts_handles_multiple_pairs() {
-        assert_eq!(parse_layouts("01:01,02:03"), vec![(0x01, 0x01), (0x02, 0x03)]);
+        assert_eq!(
+            parse_layouts("01:01,02:03"),
+            vec![(0x01, 0x01), (0x02, 0x03)]
+        );
     }
 
     #[test]
@@ -277,7 +293,8 @@ mod tests {
 
     #[test]
     fn generate_then_load_bundles_dir_round_trips() {
-        let dir = std::env::temp_dir().join(format!("catp-provision-bin-test-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("catp-provision-bin-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let code = cmd_generate(&[
             "--count".into(),
@@ -306,7 +323,8 @@ mod tests {
         // secrets -- must survive untouched; `write_file` always truncates,
         // so a sender_id collision with an earlier run must be resampled
         // away from, not written over.
-        let dir = std::env::temp_dir().join(format!("catp-provision-bin-regrow-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("catp-provision-bin-regrow-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let out = dir.to_string_lossy().into_owned();
         let generate_into = |count: &str| {
@@ -332,14 +350,19 @@ mod tests {
         // Every bundle from the first run is still present, byte-for-byte
         // (same secret, not a freshly generated one under the same name).
         for b in &first_batch {
-            assert!(second_batch.contains(b), "first batch bundle {:08x} was overwritten", b.sender_id);
+            assert!(
+                second_batch.contains(b),
+                "first batch bundle {:08x} was overwritten",
+                b.sender_id
+            );
         }
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn reissue_keeps_identity_and_changes_only_the_secret() {
-        let dir = std::env::temp_dir().join(format!("catp-provision-bin-reissue-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("catp-provision-bin-reissue-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let old_path = dir.join("old.bundle");
         let original = Bundle {
