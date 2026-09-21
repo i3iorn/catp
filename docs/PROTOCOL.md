@@ -103,7 +103,7 @@ OPTIONAL in this document are to be interpreted as described in RFC 2119.
 CATP datagrams are carried in UDP payloads. IP and UDP headers are unmodified
 and are NOT covered by the MAC (Section 7.3).
 
-Fixed overhead per datagram, using an 8-byte tag:
+Fixed overhead per datagram, using the 4-byte tag:
 
 | Layer | IPv4 | IPv6 |
 |---|---|---|
@@ -457,7 +457,7 @@ batched, and both outrank `MESSAGE` in the shedding policy of Section 10.3.
 
 `NUMBER` is the minimal case: one value, no record header, no schema. It exists
 because a large fraction of telemetry is a single reading, and for that case the
-5-byte record header and the layout registry behind it cost more than the data.
+3-byte record header and the layout registry behind it cost more than the data.
 
 `SERIES` is `NUMBER` batched across time rather than across fields. Section
 6.4.1 gives every record in a `MESSAGE` datagram one shared capture instant, by
@@ -869,7 +869,7 @@ batching `n` records converts scattered single-record gaps into a `p`
 probability of an `n`-record blackout. Trend data usually tolerates this; data
 where short gaps are material does not.
 
-`ALARM` (`0x06`) and `EVENT` (`0x05`) MUST carry exactly one record. Both are
+`ALARM` (`0x03`) and `EVENT` (`0x02`) MUST carry exactly one record. Both are
 discrete and not superseded by subsequent transmissions, and delaying one to
 fill a batch defeats the purpose of a distinct message type. They are
 transmitted immediately.
@@ -981,7 +981,7 @@ more further readings each carrying its own offset from the previous one:
   receiver MUST reject a payload whose length is not `3 + 4n`.
 - Every reading's reconstructed instant MUST fall within the epoch the header
   names: a `SERIES` datagram MUST NOT span an epoch boundary, exactly as
-  Section 10.3 already requires of a `MESSAGE` batch. A sender reaching a
+  Section 6.6.1 already requires of a `MESSAGE` batch. A sender reaching a
   boundary mid-batch MUST flush under the old epoch before continuing. A
   receiver MUST reject a payload whose cumulative offset reaches or exceeds
   `TICKS_PER_EPOCH` (Section 9.1).
@@ -1088,11 +1088,10 @@ possessing the key.
 
 The payload is covered in full, so each record's `format`, `schema_version`, and
 `size` are authenticated exactly as its `body` is, and a `NUMBER` literal is
-authenticated digit by digit. An attacker can no more relabel a record's layout,
-alter a reading, or move a datagram in time than forge one outright. An attacker can no more
-relabel a record's encoding or relocate a reading in time than alter the reading
-itself. That these fields moved out of the header (Section 4.1) changes what
-they cost on the wire, not what they are protected by.
+authenticated digit by digit. An attacker can no more relabel a record's
+`format` or `schema_version`, alter a reading, or move a datagram in time than
+forge one outright. That these fields moved out of the header (Section 4.1)
+changes what they cost on the wire, not what they are protected by.
 
 ### 7.4 Verification order
 
@@ -1351,7 +1350,7 @@ receiver reconstructs the full value:
    equal the received `epoch_low`.
 3. If neither matches, discard the datagram.
 
-Receivers MUST accept the current epoch and SHOULD accept the immediately
+Receivers MUST accept the current epoch and MUST accept the immediately
 preceding epoch, to absorb clock skew and datagrams in flight across a boundary.
 Receivers MUST NOT accept epochs older than the preceding one. The acceptance
 window is therefore 2 epochs wide, and 4 bits distinguish two adjacent
@@ -1682,7 +1681,7 @@ regardless of how many requests arrive in that window.
 
 A deployment that omits the limit turns one captured request into an unbounded
 `TIME_ANNOUNCE` generator, and the amplification favours the attacker: a
-21-byte request elicits a 25-byte response, delivered to a node that will
+17-byte request elicits a 25-byte response, delivered to a node that will
 discard it unread — Section 11.5 rule 1 refuses any announcement once a clock is
 set — so the traffic is invisible to the node operator and visible only as load
 at the collector.
@@ -1968,8 +1967,8 @@ implementation accompanying this document publishes them as
 - An **accepted** datagram carrying each non-zero value of the reserved bits,
   identical in every other respect to a baseline vector and producing identical
   application output, confirming must-ignore behaviour (Section 4.2).
-- Framing faults, one per rejection clause of Section 6.4.3: a payload shorter
-  than 4 bytes; a trailing fragment of fewer than 3 bytes; a `size` overrunning
+- Framing faults, one per rejection clause of Section 6.4.4: a payload shorter
+  than 3 bytes; a trailing fragment of fewer than 3 bytes; a `size` overrunning
   the payload; a `size` of 0; a parse ending past the payload boundary; records
   an `EVENT` carrying two records. Plus a record whose `size` disagrees with a
   fixed-width `(format, schema_version)` pair.
