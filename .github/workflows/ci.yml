@@ -25,9 +25,9 @@ jobs:
           toolchain: ${{ matrix.rust }}
       - uses: Swatinem/rust-cache@v2
       - name: cargo test (lib, bins, integration)
-        run: cargo test --all-targets
+        run: cargo test --workspace --all-targets
       - name: cargo test (frozen conformance vectors)
-        run: cargo test --test vectors
+        run: cargo test --package catp --test vectors
 
   clippy:
     name: clippy
@@ -38,7 +38,7 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets -- -D warnings
 
   build:
     name: build (release)
@@ -47,7 +47,23 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release --all-targets
+      - run: cargo build --workspace --release --all-targets
+
+  no-std:
+    name: no_std (bare-metal target, library only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabihf
+      - uses: Swatinem/rust-cache@v2
+      # Build-only smoke check (issue #37/#74): no test execution on this
+      # target, since CI has nothing to run a Cortex-M4/M4F binary on. The
+      # workspace split makes `--package catp` sufficient on its own --
+      # `catp-tools`'s five `std`-only binaries live in a separate package
+      # now, so there's no `--lib` flag needed to keep them out of this build.
+      - run: cargo build --package catp --no-default-features --target thumbv7em-none-eabihf
 
   doc:
     name: doc
@@ -89,7 +105,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo +nightly -Z minimal-versions generate-lockfile
-      - run: cargo +stable build --all-targets
+      - run: cargo +stable build --workspace --all-targets
 
   # A short bounded run per fuzz target, not a real fuzzing campaign (issue
   # #30) -- this is a regression gate ("did this PR break the harness or

@@ -8,7 +8,7 @@ implementation exists.
 
 This document defines a small subprocess protocol — the **implementation
 under test (IUT) contract** — plus `tools/run_conformance.py`, a stdlib-only
-driver that speaks it. `src/bin/conformance_iut.rs` (`catp-conformance-iut`)
+driver that speaks it. `tools/src/bin/conformance_iut.rs` (`catp-conformance-iut`)
 is the reference IUT: it implements this contract against the Rust crate
 itself, and is what proves the contract is actually implementable rather than
 only specified.
@@ -117,7 +117,7 @@ accept/reject decision didn't match `outcome`).
 ## The reference IUT: `catp-conformance-iut`
 
 ```bash
-cargo run --bin catp-conformance-iut < /dev/null   # reads stdin, writes stdout
+cargo run --package catp-tools --bin catp-conformance-iut < /dev/null   # reads stdin, writes stdout
 ```
 
 Implements the contract above directly against `catp::wire` and
@@ -136,7 +136,7 @@ contributor testing a second implementation does not need this crate's Rust
 toolchain, or any Python package, to run it):
 
 ```bash
-python3 tools/run_conformance.py -- cargo run --quiet --bin catp-conformance-iut
+python3 tools/run_conformance.py -- cargo run --quiet --package catp-tools --bin catp-conformance-iut
 python3 tools/run_conformance.py --vectors docs/test-vectors.json --report report.json -- ./my-iut
 ```
 

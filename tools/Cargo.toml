@@ -1,0 +1,42 @@
+[package]
+name = "catp-tools"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Binaries for the CATP reference implementation (sender, collector, vector generator, provisioning, conformance IUT)"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[dependencies]
+catp = { path = "..", features = ["std"] }
+# Only `catp-provision`'s CSPRNG (fresh `sender_id`/`device_secret`) needs
+# this -- see docs/DEPENDENCIES.md. Living in this package rather than the
+# library's means it's no longer part of `catp`'s dependency graph at all,
+# so it can't break a `--target thumbv7em-none-eabihf` build of the library
+# the way it did before issue #74's split (see that issue and its `catp`
+# `Cargo.toml` history for the "optional feature" workaround this replaces).
+getrandom = "0.4.3"
+
+[[bin]]
+name = "catp-sender"
+path = "src/bin/sender.rs"
+
+[[bin]]
+name = "catp-collector"
+path = "src/bin/collector.rs"
+
+[[bin]]
+name = "catp-vectors"
+path = "src/bin/vectors.rs"
+
+[[bin]]
+name = "catp-provision"
+path = "src/bin/provision.rs"
+
+[[bin]]
+name = "catp-conformance-iut"
+path = "src/bin/conformance_iut.rs"

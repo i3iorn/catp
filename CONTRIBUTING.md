@@ -44,7 +44,7 @@ assume; a new §12 claim should say which attacker (by number) it's against.
 touches the codec, wire format, or vector-generation logic in any way:
 
 ```bash
-cargo run --bin catp-vectors > docs/test-vectors.txt
+cargo run --package catp-tools --bin catp-vectors > docs/test-vectors.txt
 ```
 
 This also regenerates `docs/test-vectors.json`, a machine-readable mirror
@@ -68,9 +68,9 @@ catching wire-format drift, not a bug in the test.
 ## Before opening a PR (Rust reference implementation)
 
 ```bash
-cargo build --all-targets
-cargo test --all-targets
-cargo clippy --all-targets -- -D warnings
+cargo build --workspace --all-targets
+cargo test --workspace --all-targets
+cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --check
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 ```
@@ -78,6 +78,15 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 `cargo fmt --check` is a required CI gate
 ([#27](https://github.com/i3iorn/catp/issues/27)): run `cargo fmt` before
 committing.
+
+This is a two-package workspace (issue #74): `catp` (the library, at the
+repo root) and `catp-tools` (`tools/`, the five binaries). If your change
+touches only the library and might affect its `no_std` build, also check it
+against the real bare-metal target CI builds for:
+
+```bash
+cargo build --package catp --no-default-features --target thumbv7em-none-eabihf
+```
 
 ## Issues
 

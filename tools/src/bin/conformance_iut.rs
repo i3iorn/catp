@@ -312,7 +312,17 @@ mod tests {
         // The IUT's own verdicts must agree with what tests/vectors.rs already
         // proves against docs/test-vectors.json -- this is the check that would
         // catch this binary drifting from the crate it wraps.
-        let json = std::fs::read_to_string("docs/test-vectors.json").expect("vectors file missing");
+        //
+        // `cargo test`'s CWD for a workspace member is that member's own
+        // package directory, not the workspace root (verified empirically) --
+        // so this can't use a plain "docs/..." relative path the way
+        // tests/vectors.rs (in the root `catp` package) does. `catp`'s own
+        // `Cargo.toml`, and `docs/` beside it, are this package's parent.
+        let json = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../docs/test-vectors.json"
+        ))
+        .expect("vectors file missing");
         let objects = tinyjson::parse_array_of_objects(&json);
         for m in &objects {
             let v = verdict_of(m);
