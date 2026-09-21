@@ -45,10 +45,11 @@ If your telemetry content is itself sensitive, CATP is the wrong protocol. See
 
 ## Reference implementation
 
-Rust, `unsafe_code` forbidden crate-wide, seven direct dependencies (`hmac`,
-`sha2`, `hkdf`, `subtle`, `zeroize`, `siphasher`, `chacha20poly1305`) —
-RustCrypto crates plus their constant-time and zeroizing-memory helpers,
-`siphasher` for cipher `0x02`, and `chacha20poly1305` for cipher `0x03`,
+Rust, `unsafe_code` forbidden crate-wide, eight direct dependencies (`hmac`,
+`sha2`, `hkdf`, `subtle`, `zeroize`, `siphasher`, `chacha20poly1305`,
+`getrandom`) — RustCrypto crates plus their constant-time and
+zeroizing-memory helpers, `siphasher` for cipher `0x02`, `chacha20poly1305`
+for cipher `0x03`, and `getrandom` for `catp-provision`'s CSPRNG need,
 pulling in their usual transitive tree (`digest`, `crypto-common`, `typenum`,
 and the like). MSRV 1.88, tracked in `Cargo.toml`'s `rust-version` and tested
 in CI.
@@ -100,6 +101,33 @@ collector holds a definition for, and once as `schema_version` `0xFF`
 (`UNSTRUCTURED`, §6.4.2.2), where the sender claims no layout and the collector
 may only hand the octets back. Both records share the datagram's one capture
 instant, which is what §6.4.1 requires of a batch.
+
+### Provisioning
+
+Before any datagram can flow, a node and its collector each need the same
+`sender_id`, `device_secret`, `cipher_id`, and layout list (PROTOCOL.md
+§12.5, §9.2.1) — out-of-band, by design (§15). `catp-provision` generates,
+inspects, and reissues the bundle files (`src/provisioning.rs`) that carry
+that material between the two:
+
+```bash
+cargo run --bin catp-provision -- generate --count 10 --cipher 01 --layouts 01:01,02:02 --out ./bundles
+cargo run --bin catp-provision -- inspect ./bundles/node-1a2b3c4d.bundle
+cargo run --bin catp-provision -- reissue ./bundles/node-1a2b3c4d.bundle --out ./bundles/node-1a2b3c4d.new.bundle
+```
+
+`catp-collector` accepts a bundle directory as an optional second argument to
+bulk-provision from it, instead of the single hardcoded demo peer it uses
+when none is given:
+
+```bash
+cargo run --bin catp-collector 127.0.0.1:9999 ./bundles
+```
+
+Bundle files are `0600`-permissioned on Unix — a floor, not a substitute for
+real secret storage; see `src/bin/provision.rs`'s module docs for what this
+tool deliberately does not attempt (an HSM backend, automated rotation, a
+centralized `sender_id` registry for very large fleets).
 
 ### Tests
 

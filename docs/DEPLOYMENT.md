@@ -173,7 +173,14 @@ a deployment makes for itself; none has a default this document can supply.
    at manufacture, storage at rest, and post-compromise reissue are out of scope
    for the specification and are the largest remaining deployment task. Note
    that §9.2.1 forbids the two shortcuts that would make it easy — a fleet-wide
-   secret, and per-device keys derived from a fleet root.
+   secret, and per-device keys derived from a fleet root. The reference
+   implementation's `catp-provision` (README.md "Provisioning") generates and
+   reissues bundle files carrying `sender_id`, `device_secret`, `cipher_id`,
+   and layouts, and `catp-collector` can bulk-load a directory of them — but
+   it stops at that: no secure/HSM storage backend, no automated rotation over
+   a network (CATP has no provisioning channel to automate over), and no
+   centralized `sender_id` registry for fleets past §4.4.1's 10,000-node
+   tier. Those remain a deployment's own task.
 
 2. **Layout definition and distribution** (§6.4.2.1): assignment of
    `schema_version` values per `format`, and the per-field layout, widths, and
