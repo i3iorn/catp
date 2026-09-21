@@ -9,7 +9,21 @@
 //! implemented -- see [`mac`].
 
 #![forbid(unsafe_code)]
+#![cfg_attr(not(feature = "std"), no_std)]
 
+// Always linked, `std` or not: `alloc` is a sysroot crate available on any
+// target that has a global allocator, which every target this crate's
+// `no_std` build targets is expected to provide (issue #37's `alloc` tier --
+// see that issue for the allocation-free tier this does not attempt).
+extern crate alloc;
+
+// `pub(crate)` rather than a plain `use`, so `use crate::*` in the sibling
+// modules (`wire`, `peer`, `control`) picks these up too -- every one of
+// them needs `Vec` at minimum, and re-importing `alloc::vec::Vec` by hand in
+// each would be the same three lines repeated four times for no benefit.
+pub(crate) use alloc::string::String;
+pub(crate) use alloc::vec::Vec;
+pub(crate) use alloc::{format, vec};
 use chacha20poly1305::aead::AeadInOut;
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit as AeadKeyInit};
 use hkdf::Hkdf;
@@ -23,11 +37,15 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 pub mod control;
 pub mod peer;
+#[cfg(feature = "std")]
 pub mod provisioning;
 pub mod wire;
 
 pub use control::{Capability, Control};
-pub use peer::{Collector, NodeClock, PeerState, Stats};
+#[cfg(feature = "std")]
+pub use peer::Collector;
+pub use peer::{NodeClock, PeerState, Stats};
+#[cfg(feature = "std")]
 pub use provisioning::{Bundle, ProvisionError};
 pub use wire::{Datagram, Record};
 
@@ -276,12 +294,16 @@ pub fn scale_is_valid(scale: u8) -> bool {
 /// Render `mantissa * 10^-scale` in decimal, e.g. `(2, 2350) -> "23.50"`
 /// (PROTOCOL.md 6.3.1). For display only; the wire value is the
 /// `(scale, mantissa)` pair, not this string.
+///
+/// Builds the divisor with a loop rather than `f64::powi`, which is a
+/// `std`-only method (it needs a platform `libm`, unavailable in `core`).
+/// `scale` is always `SCALE_MIN..=SCALE_MAX` (7 at most), so this is cheap.
 pub fn format_scaled(scale: u8, mantissa: i16) -> String {
-    format!(
-        "{:.*}",
-        scale as usize,
-        mantissa as f64 / 10f64.powi(scale as i32)
-    )
+    let mut divisor = 1f64;
+    for _ in 0..scale {
+        divisor *= 10.0;
+    }
+    format!("{:.*}", scale as usize, mantissa as f64 / divisor)
 }
 
 /// Validate and decode a `NUMBER` payload (PROTOCOL.md 6.3): exactly
@@ -960,6 +982,20 @@ mod tests {
         let s = DeviceSecret::new([1u8; 32]);
         let _k: zeroize::Zeroizing<[u8; 32]> = s.epoch_key(1, 1, Direction::NodeToCollector);
         let _t: zeroize::Zeroizing<[u8; 32]> = s.time_key(1, Direction::NodeToCollector);
+    }
+
+    /// Locks in `format_scaled`'s output against PROTOCOL.md 6.3.1's own
+    /// worked examples now that it no longer calls `f64::powi` (a `std`-only
+    /// method unavailable in `core` -- see the function's own doc comment).
+    #[test]
+    fn format_scaled_matches_the_spec_examples() {
+        assert_eq!(format_scaled(0x01, 2350), "235.0");
+        assert_eq!(format_scaled(0x02, 2350), "23.50");
+        assert_eq!(format_scaled(0x03, 2350), "2.350");
+        assert_eq!(format_scaled(0x04, 2350), "0.2350");
+        assert_eq!(format_scaled(0x05, 2350), "0.02350");
+        assert_eq!(format_scaled(0x06, 2350), "0.002350");
+        assert_eq!(format_scaled(0x07, 2350), "0.0002350");
     }
 
     #[test]

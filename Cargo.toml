@@ -24,15 +24,37 @@ unsafe_code = "forbid"
 [lints.clippy]
 all = { level = "warn", priority = -1 }
 
+[features]
+# Default on so nothing downstream breaks. Without it, the crate is
+# `#![no_std]` + `alloc`: the codec, key schedule, replay window, and
+# pacer need no more than that (see issue #37's survey). `std` adds
+# `Collector`, the multi-peer host-side registry, and `catp::provisioning`
+# (file I/O), neither of which a constrained node ever needs.
+default = ["std", "getrandom"]
+std = []
+# Toggles the optional `getrandom` dependency. Nothing in the *library*
+# uses it -- only `catp-provision` (its CSPRNG for a fresh `sender_id`/
+# `device_secret`) does. It's still a real dependency of this package's
+# Cargo.toml, though, and Cargo resolves a package's dependency graph as a
+# whole regardless of which target is being built: `cargo build --lib`
+# alone does not skip a dependency only a `[[bin]]` uses. Left non-optional,
+# `getrandom` broke `cargo build --lib --no-default-features` for a
+# bare-metal target outright (no backend exists there for it, by design --
+# see its own docs on custom backends). Making it optional, and off by
+# default only when `std` is also off, is the fix until #74 moves the
+# binaries into their own package and this stops being a shared-manifest
+# problem at all.
+getrandom = ["dep:getrandom"]
+
 [dependencies]
 hmac = "0.13"
-sha2 = "0.11"
+sha2 = { version = "0.11", default-features = false }
 hkdf = "0.13"
-subtle = "2"
-zeroize = { version = "1", features = ["derive"] }
+subtle = { version = "2", default-features = false }
+zeroize = { version = "1", default-features = false, features = ["derive"] }
 siphasher = { version = "1.0.3", default-features = false }
 chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["alloc"] }
-getrandom = "0.4.3"
+getrandom = { version = "0.4.3", optional = true }
 
 [[bin]]
 name = "catp-sender"
