@@ -351,12 +351,12 @@ pub fn validate_series(p: &[u8], anchor_offset: u32) -> Result<(u8, Vec<(u32, i1
     Ok((scale, readings))
 }
 
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{self:?}")
     }
 }
-impl std::error::Error for Error {}
+impl core::error::Error for Error {}
 
 // ------------------------------------------------------------------ key sched
 
