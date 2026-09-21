@@ -420,11 +420,12 @@ range is `0x00`-`0x1F`.
 vendor from standard.
 
 **Framing is a property of the individual type, not of the range.** Most data
-types are record-framed (Section 6.4), but `NUMBER` is not, and control types
-have fixed layouts. The tables below state the framing for every type, and a
-receiver MUST take it from there rather than inferring it from the range. No
-single bit distinguishes them, because `NUMBER` exists precisely to skip record
-framing.
+types are record-framed (Section 6.4), but `NUMBER` is not, and standard control
+types have fixed layouts (Section 6.7), while vendor control types are
+record-framed (Section 6.7). The tables below state the framing for every type,
+and a receiver MUST take it from there rather than inferring it from the range.
+No single bit distinguishes them, because `NUMBER` exists precisely to skip
+record framing.
 
 `0x00` is permanently unassigned so that zero-filled or truncated buffers decode
 as invalid rather than silently matching a real type.
@@ -479,7 +480,7 @@ validated by the protocol.
 | `0x13`        | `HEARTBEAT`            | Liveness signal. Empty payload. |
 | `0x14`        | `CAPABILITY_ADVERTISE` | Supported versions, ciphers, and layouts. |
 | `0x15`-`0x17` | —                      | Reserved. |
-| `0x18`-`0x1F` | —                      | Vendor control types. Fixed layout. |
+| `0x18`-`0x1F` | —                      | Vendor control types. One record (Section 6.7). |
 
 CATP defines no stateful-replication messages. Snapshot/delta replication
 requires a receiver that holds application state, a return path to request
@@ -887,12 +888,22 @@ filled buffer MUST flush it under the old epoch before beginning a new one.
 
 ### 6.7 Control message payloads
 
-`EPOCH_ANNOUNCE` and `TIME_ANNOUNCE` are specified in Sections 9.4 and 11.
-`HEARTBEAT` (`0x13`) carries an empty payload.
+**Standard control types (`0x10`-`0x17`)** are not record-framed. They carry
+neither `format`, `schema_version`, nor `size`; their layouts are fixed by this
+document and identified by `msg_type` alone. `EPOCH_ANNOUNCE` and `TIME_ANNOUNCE`
+are specified in Sections 9.4 and 11; `HEARTBEAT` (`0x13`) carries an empty
+payload.
 
-Control messages (`0x10`-`0x1F`) are not record-framed. They carry neither
-`format`, `schema_version`, nor `size`; their layouts are fixed by this document
-and identified by `msg_type` alone.
+**Vendor control types (`0x18`-`0x1F`)** are record-framed. The payload is a
+single record (Section 6.4): a 24-bit `format | schema_version | size` header
+followed by `size` bytes of body, with no trailing bytes. This puts vendor
+control types on exactly the footing of vendor data types. The receiver
+validates the framing by the same rules (Section 6.4.4), reads `format` and
+`schema_version` against the same out-of-band layout registry (Section 6.4.2.1),
+and applies the same skip rule to unknown `(format, schema_version)` pairs
+(Section 6.4.4). Because a vendor control payload permits exactly one record,
+skipping that record discards the whole datagram, and the two rules coincide.
+Field semantics remain out of band, as for any record.
 
 Because `datagram_offset` is a header field (Section 4.1), control payloads
 carry no offset prefix. `HEARTBEAT` is therefore a datagram with no payload at
@@ -1129,6 +1140,14 @@ attacker-writable before the MAC verifies, and updating them early converts a
 cheap flood into a state-corruption attack.
 
 Tag comparison MUST be constant-time.
+
+Receivers SHOULD maintain the counter of datagrams failing at step 7 (MAC
+verification) separately from those rejected at steps 1–6. A consistent MAC
+failure rate from a known `sender_id` — one that does not respond to rekeying,
+fresh packets, or a corrected clock — is far more likely clock drift than
+forgery, and is the one sign an operator can use to distinguish the two. Sections
+9.3 and 12.6 both identify this diagnostic trap; keeping the counters
+distinguishable is what makes it visible.
 
 ---
 
@@ -1934,7 +1953,10 @@ implementation accompanying this document publishes them as
 - One accepted datagram per `msg_type`, each giving `device_secret`,
   `sender_id`, `epoch_id`, `datagram_offset`, payload, derived key, and expected
   tag bytes, for every registered `cipher_id`, including the 4-byte tag of
-  `0x04`.
+  `0x04`. `TIME_REQUEST` and `TIME_ANNOUNCE` are exempt from the cipher sweep:
+  they mandate `cipher_id` `0x01` and derive their key from `time_key`, not
+  `epoch_key` (Section 11.2); their vectors appear separately under "Cold
+  start".
 - For `cipher_id` `0x03` specifically: two datagrams differing only in
   `datagram_offset`, demonstrating distinct nonces, plus the constructed
   13-byte `auth_header` as AAD, with the `epoch_low` bits shown zeroed.

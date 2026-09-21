@@ -37,7 +37,7 @@ pub const VERSION: u8 = 1;
 /// Epoch duration in seconds (PROTOCOL.md 9.1).
 pub const EPOCH_SECS: u64 = 128;
 
-/// `epoch_offset` ticks per second (PROTOCOL.md 6.4.2).
+/// `epoch_offset` ticks per second (PROTOCOL.md 10.1).
 pub const TICKS_PER_SEC: u64 = 4096;
 
 /// Ticks in one epoch. Exactly `2^19`, so the 19-bit field spans an epoch.

@@ -16,9 +16,9 @@ pub enum Control {
     /// rather than an epoch key, so it has its own entry point
     /// ([`crate::wire::decode_time_announce`]).
     TimeAnnounce { asserted_time: i64 },
-    /// `HEARTBEAT` (`0x12`) — empty payload.
+    /// `HEARTBEAT` (`0x13`) — empty payload.
     Heartbeat,
-    /// `CAPABILITY_ADVERTISE` (`0x13`) — advisory (PROTOCOL.md 6.7.1).
+    /// `CAPABILITY_ADVERTISE` (`0x14`) — advisory (PROTOCOL.md 6.7.1).
     Capability(Capability),
 }
 
