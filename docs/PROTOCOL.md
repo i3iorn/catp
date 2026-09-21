@@ -1029,7 +1029,7 @@ tag = truncate(MAC(epoch_key, auth_header || payload), 8)
 For `cipher_id` `0x03` (ChaCha20-Poly1305, AAD-only):
 
 ```
-nonce = 0x00 * 10 || datagram_offset         (12 bytes, big-endian offset)
+nonce = 0x00 * 8 || datagram_offset          (12 bytes; offset as a big-endian u32)
 tag   = ChaCha20-Poly1305-Seal(
             key        = epoch_key,
             nonce      = nonce,
@@ -1040,6 +1040,10 @@ tag   = ChaCha20-Poly1305-Seal(
 
 The plaintext is empty, so the construction produces no ciphertext and CATP
 remains a plaintext protocol; only the 16-byte Poly1305 tag is transmitted.
+
+`datagram_offset` is zero-extended from its 19-bit header field (Section 4.1)
+to a full 4-byte big-endian `u32` here — a wider, independent serialization
+for the nonce, not a reuse of the header's packed 3-byte encoding.
 
 `epoch_key` is derived per Section 9.2 and is always 32 bytes. `cipher_id`
 `0x01` (HMAC-SHA256) and `0x03` (ChaCha20-Poly1305) both accept a 256-bit key
