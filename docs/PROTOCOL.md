@@ -29,18 +29,69 @@ prerequisite. Section 11 addresses what a device does before it has one.
 ## Table of contents
 1. [Requirements language](#1-requirements-language)
 2. [Design goals and non-goals](#2-design-goals-and-non-goals)
+   - [2.1 Goals](#21-goals)
+   - [2.2 Non-goals](#22-non-goals)
 3. [Transport](#3-transport)
+   - [3.1 Datagram size limits](#31-datagram-size-limits)
 4. [Datagram format](#4-datagram-format)
+   - [4.1 Header fields](#41-header-fields)
+   - [4.2 Reserved bits are must-ignore](#42-reserved-bits-are-must-ignore)
+   - [4.3 Field order and packing](#43-field-order-and-packing)
+   - [4.4 Node identity](#44-node-identity)
 5. [Version handling](#5-version-handling)
 6. [Message types](#6-message-types)
+   - [6.1 Data types (`0x01`-`0x0F`)](#61-data-types-0x01-0x0f)
+   - [6.2 Control types (`0x10`-`0x1F`)](#62-control-types-0x10-0x1f)
+   - [6.3 NUMBER (`0x04`)](#63-number-0x04)
+   - [6.4 Record format](#64-record-format)
+   - [6.5 Payload framing versus field semantics](#65-payload-framing-versus-field-semantics)
+   - [6.6 Datagram capacity](#66-datagram-capacity)
+   - [6.7 Control message payloads](#67-control-message-payloads)
+   - [6.8 Absence of an authentication-failure message](#68-absence-of-an-authentication-failure-message)
+   - [6.9 SERIES (`0x05`)](#69-series-0x05)
 7. [Authentication](#7-authentication)
+   - [7.1 Authenticated header image](#71-authenticated-header-image)
+   - [7.2 Tag computation](#72-tag-computation)
+   - [7.3 Coverage](#73-coverage)
+   - [7.4 Verification order](#74-verification-order)
 8. [Cipher suites](#8-cipher-suites)
+   - [8.1 Registry](#81-registry)
+   - [8.2 The registry is append-only](#82-the-registry-is-append-only)
+   - [8.3 Cipher selection is configuration, not negotiation](#83-cipher-selection-is-configuration-not-negotiation)
+   - [8.4 Unrecognized cipher_id](#84-unrecognized-cipher_id)
 9. [Key epochs](#9-key-epochs)
+   - [9.1 Epoch duration](#91-epoch-duration)
+   - [9.2 Key derivation](#92-key-derivation)
+   - [9.3 Epoch representation and acceptance window](#93-epoch-representation-and-acceptance-window)
+   - [9.4 EPOCH_ANNOUNCE](#94-epoch_announce)
 10. [Datagram offset and replay protection](#10-datagram-offset-and-replay-protection)
+    - [10.1 Semantics](#101-semantics)
+    - [10.2 Replay window](#102-replay-window)
+    - [10.3 Rate limiting and shedding](#103-rate-limiting-and-shedding)
+    - [10.4 Restart behaviour](#104-restart-behaviour)
+    - [10.5 Offset gaps are not errors](#105-offset-gaps-are-not-errors)
 11. [Cold start and time recovery](#11-cold-start-and-time-recovery)
+    - [11.1 The bootstrapping problem](#111-the-bootstrapping-problem)
+    - [11.2 The time key](#112-the-time-key)
+    - [11.3 TIME_REQUEST (0x12)](#113-time_request-0x12)
+    - [11.4 TIME_ANNOUNCE (0x11)](#114-time_announce-0x11)
+    - [11.5 Acceptance rules](#115-acceptance-rules)
+    - [11.6 Collector behaviour](#116-collector-behaviour)
+    - [11.7 Residual exposure](#117-residual-exposure)
 12. [Security considerations](#12-security-considerations)
+    - [12.1 What CATP provides](#121-what-catp-provides)
+    - [12.2 Tag length](#122-tag-length)
+    - [12.3 Key compromise](#123-key-compromise)
+    - [12.4 No confidentiality](#124-no-confidentiality)
+    - [12.5 Denial of service](#125-denial-of-service)
+    - [12.6 Time synchronization](#126-time-synchronization)
 13. [IANA considerations](#13-iana-considerations)
+    - [13.1 Port](#131-port)
+    - [13.2 Registry governance](#132-registry-governance)
 14. [Conformance](#14-conformance)
+    - [14.1 Test vectors](#141-test-vectors)
+    - [14.2 Required adversarial tests](#142-required-adversarial-tests)
+    - [14.3 Interoperability](#143-interoperability)
 15. [Open items](#15-open-items)
 16. [References](#16-references)
 
@@ -1577,7 +1628,10 @@ unavailable here.
 A deployment that needs a loss-rate metric MUST carry a transmitted-datagram
 count in application data, where the sender can state it directly.
 
+---
+
 ## 11. Cold start and time recovery
+
 ### 11.1 The bootstrapping problem
 
 CATP derives keys from wall-clock time (Section 9.2.4) and accepts only a
@@ -1595,6 +1649,7 @@ the handshake and round-trips CATP exists to avoid.
 Deployments with an authenticated time source available — GNSS, PTP, NTS, or a
 battery-backed RTC set at manufacture — SHOULD use it, and MAY omit this section
 entirely. TIME_REQUEST and TIME_ANNOUNCE exist for deployments that have none.
+
 ### 11.2 The time key
 
 TIME_REQUEST and TIME_ANNOUNCE are authenticated under a key derived with
@@ -1602,9 +1657,9 @@ no epoch input, so that a node with no clock can use the protocol:
 
 ```
 time_key = HKDF-Expand(
-PRK,
-info = "CATP1-time" || sender_id || direction,
-L    = 32
+    PRK,
+    info = "CATP1-time" || sender_id || direction,
+    L    = 32
 )
 ```
 
@@ -1612,8 +1667,8 @@ with PRK as in Section 9.2.
 
 The direction byte is part of the key derivation and has protocol meaning:
 
-    0x00 — node to collector
-    0x01 — collector to node
+- `0x00` — node to collector
+- `0x01` — collector to node
 
 Thus TIME_REQUEST and TIME_ANNOUNCE use distinct directional keys even
 though both are in the time-recovery domain. A receiver MUST verify a message
@@ -1632,6 +1687,7 @@ Both message types use HMAC-SHA256 with the truncated tag defined for
 cipher_id 0x01. This is required regardless of the suite configured for
 the association. The time-recovery messages are not encrypted and do not use
 the epoch-derived AEAD suite.
+
 ### 11.3 TIME_REQUEST (0x12)
 
 TIME_REQUEST is sent by a node that has no valid clock to request a
@@ -1641,12 +1697,12 @@ The message has no payload.
 
 A TIME_REQUEST MUST carry:
 
-    sender_id — the node's identifier.
-    cipher_id 0x01 (HMAC-SHA256, truncated).
-    epoch_low 0b0000.
-    header datagram_offset 0.
+- `sender_id` — the node's identifier.
+- `cipher_id` `0x01` (HMAC-SHA256, truncated).
+- `epoch_low` `0b0000`.
+- header `datagram_offset` `0`.
 
-The MAC is computed over auth_header with epoch_id 0x00000000
+The MAC is computed over `auth_header` with `epoch_id` `0x00000000`
 (Section 7.1).
 
 A node MUST send TIME_REQUEST only while it has no valid clock. It SHOULD
@@ -1690,45 +1746,49 @@ The consequences remain bounded. A replayed request cannot cause the collector
 to accept attacker-chosen time, cannot disclose epoch keys, and cannot move the
 clock of any node that already has one. This is a resource-exhaustion concern,
 not an authentication one.
+
 ### 11.4 TIME_ANNOUNCE (0x11)
 
 Payload:
-Field	Width	Description
-asserted_time	8 bytes	Collector's UTC seconds since 1970-01-01, signed 64-bit.
+
+| Field | Width | Description |
+|---|---|---|
+| `asserted_time` | 8 bytes | Collector's UTC seconds since 1970-01-01, signed 64-bit. |
 
 Header constraints. A TIME_ANNOUNCE MUST carry:
 
-    sender_id — the node's identifier, as with all collector-to-node traffic
-    (Section 4.4).
-    cipher_id 0x01 (HMAC-SHA256, truncated). This is REQUIRED regardless of
-    the suite configured for the association, and is the one place Section 8.3's
-    configured-suite check is relaxed.
-    epoch_low 0b0000 and header datagram_offset 0.
+- `sender_id` — the node's identifier, as with all collector-to-node traffic
+  (Section 4.4).
+- `cipher_id` `0x01` (HMAC-SHA256, truncated). This is REQUIRED regardless of
+  the suite configured for the association, and is the one place Section 8.3's
+  configured-suite check is relaxed.
+- `epoch_low` `0b0000` and header `datagram_offset` `0`.
 
 Receivers MUST reject a TIME_ANNOUNCE violating any of these. The MAC is
-computed over auth_header with epoch_id 0x00000000 (Section 7.1), using
-the collector-to-node time_key with direction 0x01.
+computed over `auth_header` with `epoch_id` `0x00000000` (Section 7.1), using
+the collector-to-node `time_key` with direction `0x01`.
 
-cipher_id 0x01 is mandatory here because 0x03 is unusable: its nonce is
-datagram_offset (Section 7.2), and a message transmitted outside any epoch has
+`cipher_id` `0x01` is mandatory here because `0x03` is unusable: its nonce is
+`datagram_offset` (Section 7.2), and a message transmitted outside any epoch has
 no offset space to draw a unique nonce from. Two TIME_ANNOUNCE messages
 asserting different times under a fixed time_key and a fixed zero offset
 would repeat a Poly1305 nonce and disclose the key. A nonce-free MAC has no such
 requirement, and the 64-bit tag is adequate for a message whose only effect is
 bounded by Section 11.5.
+
 ### 11.5 Acceptance rules
 
 A node MUST accept a TIME_ANNOUNCE only when all of the following hold:
 
-    The node has no valid clock. A node whose clock is already set MUST silently
-    discard TIME_ANNOUNCE without evaluating it further.
-    The MAC verifies under the collector-to-node time_key, using direction
-    0x01.
-    asserted_time is strictly greater than last_epoch * 128, where
-    last_epoch is the persisted value of Section 10.4.
+1. The node has no valid clock. A node whose clock is already set MUST
+   silently discard TIME_ANNOUNCE without evaluating it further.
+2. The MAC verifies under the collector-to-node `time_key`, using direction
+   `0x01`.
+3. `asserted_time` is strictly greater than `last_epoch * 128`, where
+   `last_epoch` is the persisted value of Section 10.4.
 
-On acceptance the node sets its clock to asserted_time, updates last_epoch
-to floor(asserted_time / 128), persists it, and marks its clock valid. It MUST
+On acceptance the node sets its clock to `asserted_time`, updates `last_epoch`
+to `floor(asserted_time / 128)`, persists it, and marks its clock valid. It MUST
 then discard all further TIME_ANNOUNCE messages until its next cold start.
 
 Rule 1 is what keeps this from being a clock-manipulation channel against
@@ -1746,6 +1806,7 @@ the accepted time lie strictly beyond the persisted last_epoch floor.
 Note that Section 10.4's transmit rule composes with this: having set
 last_epoch from asserted_time, the node still waits for the epoch to advance
 past it before its first transmission.
+
 ### 11.6 Collector behaviour
 
 A collector SHOULD respond to an authenticated TIME_REQUEST from a node that
@@ -1768,6 +1829,7 @@ outage, once per silent node.
 TIME_REQUEST does not replace this proactive behavior. It provides a
 clockless node with a way to solicit recovery when it is able to transmit but
 has no epoch-derived keys.
+
 ### 11.7 Residual exposure
 
 An attacker who can replay a captured TIME_ANNOUNCE to a booting node can pin
@@ -1789,7 +1851,6 @@ material.
 Deployments for which even this residual exposure is unacceptable MUST
 provision an authenticated time source and disable TIME_REQUEST and
 TIME_ANNOUNCE.
-
 
 ---
 
