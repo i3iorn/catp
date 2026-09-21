@@ -54,6 +54,15 @@ pulling in their usual transitive tree (`digest`, `crypto-common`, `typenum`,
 and the like). MSRV 1.88, tracked in `Cargo.toml`'s `rust-version` and tested
 in CI.
 
+`#![no_std]` (`--no-default-features`, still needs `alloc`): the codec, key
+schedule, replay window, and pacer build and lint clean against a real
+bare-metal target (`thumbv7em-none-eabihf`). `Collector` (the multi-peer,
+host-side registry) and `catp::provisioning` (file I/O) are `std`-only —
+neither is something a constrained sender needs. See
+[`docs/DEPENDENCIES.md`](docs/DEPENDENCIES.md#no_std--alloc-issue-37) for the
+feature flags and issue #37 for the allocation-free tier this doesn't
+attempt.
+
 ```
 src/lib.rs      key schedule, epoch math, replay window, NUMBER/SERIES codec, pacer
 src/wire.rs     datagram and record codec, verification order of §7.4

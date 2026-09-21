@@ -11,6 +11,7 @@
 
 use crate::wire::{Accepted, PeerConfig, decode};
 use crate::*;
+#[cfg(feature = "std")]
 use std::collections::HashMap;
 
 /// A window for one epoch, plus the epoch it belongs to.
@@ -307,6 +308,11 @@ impl PeerState {
 }
 
 /// A collector serving many senders.
+///
+/// `std`-only: this is the genuinely unbounded, multi-peer, host-side
+/// registry issue #37 keeps out of the `no_std` core. A node never needs
+/// it -- it only ever authenticates as itself, via one [`PeerState`].
+#[cfg(feature = "std")]
 pub struct Collector {
     peers: HashMap<u32, PeerState>,
     /// Only ever holds `too_short` and `unknown_sender`: both are decided
@@ -314,12 +320,14 @@ pub struct Collector {
     own_stats: Stats,
 }
 
+#[cfg(feature = "std")]
 impl Default for Collector {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(feature = "std")]
 impl Collector {
     pub fn new() -> Self {
         Self {

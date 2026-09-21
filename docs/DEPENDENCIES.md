@@ -9,13 +9,13 @@ acceptance.
 
 ```
 hmac              0.13
-sha2              0.11
+sha2              0.11 (no default features)
 hkdf              0.13
-subtle            2
-zeroize           1 (+derive)
-siphasher         1
-chacha20poly1305  0.11 (+alloc)
-getrandom         0.4
+subtle            2   (no default features)
+zeroize           1   (no default features, +derive)
+siphasher         1   (no default features)
+chacha20poly1305  0.11 (no default features, +alloc)
+getrandom         0.4  (optional -- see "no_std / alloc", below)
 ```
 
 `subtle`, `zeroize`, and `siphasher` are 1.x; `hmac`, `sha2`, `hkdf`,
@@ -37,11 +37,45 @@ own transitive tree.
 
 `getrandom` (`catp-provision`, issue #34 — generating a fresh `sender_id` and
 `device_secret` needs an actual OS CSPRNG, not a crate substitute) is used
-directly (`getrandom::u32()`, `getrandom::fill()`) with default features. It
-is not linked into the library or the wire-facing binaries (`catp-sender`,
-`catp-collector`, `catp-vectors`) at all — only `catp-provision` calls it —
-and brings in only `libc` (Unix) or `r-efi` (UEFI) transitively; no `std`
-feature is needed for the platforms this project targets.
+directly (`getrandom::u32()`, `getrandom::fill()`). It is not linked into the
+library itself or the wire-facing binaries (`catp-sender`, `catp-collector`,
+`catp-vectors`) at all — only `catp-provision` calls it — and brings in only
+`libc` (Unix) or `r-efi` (UEFI) transitively; no `std` feature is needed for
+the platforms this project targets. It is `optional = true`, gated by a
+feature of the same name (on by default — see below), because Cargo resolves
+a package's `[dependencies]` as a whole regardless of which target is being
+built: left non-optional, `getrandom` broke a `no_std` library-only build
+outright, since no backend exists for it on a bare-metal target without a
+custom one.
+
+## `no_std` / `alloc` (issue #37)
+
+```toml
+[features]
+default = ["std", "getrandom"]
+std = []
+getrandom = ["dep:getrandom"]
+```
+
+Without the `std` feature, the crate is `#![no_std]` — but still links
+`alloc` unconditionally (it is a sysroot crate, always available where a
+global allocator exists, not something worth its own toggle here). The
+codec, key schedule, replay window, and pacer — everything a constrained
+*node* needs — compile and pass `cargo clippy` against a real bare-metal
+target (`thumbv7em-none-eabihf`) with `--no-default-features`. `Collector`
+(the multi-peer, host-side registry — a node never needs it) and
+`catp::provisioning` (file I/O) are both `#[cfg(feature = "std")]`-gated.
+
+This is the `alloc` tier of #37's two-tier split, not the allocation-free
+tier (issue #75): `Vec<u8>` throughout `Record`/`Datagram`/`Capability` still
+needs a heap allocator, just not an OS underneath it.
+
+Three of the tightened `default-features = false` lines above exist
+specifically for this: `sha2`'s defaults (`alloc`, `oid`) and `zeroize`'s
+default (`alloc`) are both unneeded by what this crate actually calls, and
+`subtle`'s default (`std`) linked `std` unconditionally regardless of this
+crate's own `#![no_std]` attribute — that one doesn't merely bloat the
+build, it breaks it outright for a target with no `std` to find.
 
 ## Pre-1.0 RustCrypto is accepted, deliberately
 
