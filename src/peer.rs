@@ -13,6 +13,12 @@ use crate::wire::{Accepted, PeerConfig, decode};
 use crate::*;
 use std::collections::HashMap;
 
+/// A window for one epoch, plus the epoch it belongs to.
+struct EpochWindow {
+    epoch: u32,
+    window: ReplayWindow,
+}
+
 /// Discard counters, categorized by the PROTOCOL.md 7.4 step that would have
 /// rejected the datagram. Section 6.8's whole design is that a failure is
 /// "silent discard on the wire; counted locally" -- this is that count,
@@ -119,8 +125,12 @@ impl Stats {
 pub struct PeerState {
     pub config: PeerConfig,
     /// One window per accepted epoch. At most two are ever live, because
-    /// Section 9.3 accepts only `{local-1, local}`.
-    windows: HashMap<u32, ReplayWindow>,
+    /// Section 9.3 accepts only `{local-1, local}` -- a fixed 2-slot array
+    /// rather than a map, since the key space is exactly that bounded pair,
+    /// never an arbitrary one. This also keeps `PeerState` free of any
+    /// hash-table dependency, unlike `Collector`'s genuinely unbounded
+    /// `sender_id` registry.
+    windows: [Option<EpochWindow>; 2],
     window_entries: u32,
     highest_epoch_announced: Option<u32>,
     /// `None` unless `config.inbound_rate_limit` was set; see
@@ -150,7 +160,7 @@ impl PeerState {
         let limiter = config.inbound_rate_limit.map(InboundLimiter::new);
         Ok(Self {
             config,
-            windows: HashMap::new(),
+            windows: [None, None],
             window_entries: entries,
             highest_epoch_announced: None,
             limiter,
@@ -161,8 +171,53 @@ impl PeerState {
     /// Windows for epochs outside the acceptance window are discarded
     /// (PROTOCOL.md 10.2).
     fn prune(&mut self, local_epoch: u32) {
-        self.windows
-            .retain(|&e, _| e + 1 >= local_epoch && e <= local_epoch);
+        for slot in &mut self.windows {
+            if let Some(ew) = slot
+                && !(ew.epoch + 1 >= local_epoch && ew.epoch <= local_epoch)
+            {
+                *slot = None;
+            }
+        }
+    }
+
+    /// The window for `epoch`, allocating a fresh one if none exists yet.
+    ///
+    /// A free function over just the `windows` slots, not a `&mut self`
+    /// method, so the borrow it returns doesn't tie up the rest of
+    /// `PeerState` (in particular `config`, which `decode` also needs at the
+    /// call site).
+    ///
+    /// Only ever called with an `epoch` already known to reconstruct within
+    /// `{local_epoch - 1, local_epoch}` (Section 9.3), and always after
+    /// [`Self::prune`] has just removed anything outside that same pair --
+    /// so at most one slot can be occupied by a *different* epoch when this
+    /// runs, and the other is free for `epoch` to claim. The fallback that
+    /// evicts a slot outright only exists to keep this function total rather
+    /// than trust that invariant with a panic; it should never fire.
+    fn window_for(
+        windows: &mut [Option<EpochWindow>; 2],
+        epoch: u32,
+        entries: u32,
+    ) -> &mut ReplayWindow {
+        let idx = if let Some(i) = windows
+            .iter()
+            .position(|s| matches!(s, Some(ew) if ew.epoch == epoch))
+        {
+            i
+        } else if let Some(i) = windows.iter().position(|s| s.is_none()) {
+            windows[i] = Some(EpochWindow {
+                epoch,
+                window: ReplayWindow::new(entries),
+            });
+            i
+        } else {
+            windows[0] = Some(EpochWindow {
+                epoch,
+                window: ReplayWindow::new(entries),
+            });
+            0
+        };
+        &mut windows[idx].as_mut().unwrap().window
     }
 
     /// Verify one datagram from this peer.
@@ -201,10 +256,7 @@ impl PeerState {
         let epoch = reconstruct_epoch(local_epoch, buf[1] & 0x0F).ok_or(Error::EpochOutOfWindow)?;
         self.prune(local_epoch);
         let entries = self.window_entries;
-        let window = self
-            .windows
-            .entry(epoch)
-            .or_insert_with(|| ReplayWindow::new(entries));
+        let window = Self::window_for(&mut self.windows, epoch, entries);
         let accepted = decode(buf, &self.config, local_epoch, dir, window)?;
         if let Some(limiter) = &mut self.limiter
             && !limiter.try_acquire(now_ms)
@@ -250,7 +302,7 @@ impl PeerState {
 
     /// Number of live replay windows. At most 2 after any `accept`.
     pub fn live_windows(&self) -> usize {
-        self.windows.len()
+        self.windows.iter().filter(|s| s.is_some()).count()
     }
 }
 
