@@ -37,6 +37,7 @@ If your telemetry content is itself sensitive, CATP is the wrong protocol. See
 | [`docs/test-vectors.txt`](docs/test-vectors.txt) | Frozen conformance vectors (§14.1). The authority a second implementation checks itself against. |
 | [`docs/test-vectors.json`](docs/test-vectors.json) | The same vectors, machine-readable. Generated from the same call sites as the text file, so they cannot drift. |
 | [`docs/CONFORMANCE.md`](docs/CONFORMANCE.md) | Non-normative. Maps each §14.2 required adversarial test to the test that discharges it. |
+| [`docs/CONFORMANCE_RUNNER.md`](docs/CONFORMANCE_RUNNER.md) | Non-normative. The subprocess contract a second implementation's own vector check speaks, plus the driver that runs it. |
 | [`docs/DEPENDENCIES.md`](docs/DEPENDENCIES.md) | Non-normative. Dependency policy: what a version bump requires, supply-chain tooling. |
 | [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) | Non-normative. The attacker capabilities Section 12's claims assume. |
 | [`SECURITY.md`](SECURITY.md) | How to report a vulnerability, and what's a documented non-goal rather than one. |
@@ -136,6 +137,24 @@ fleet-size memory table (`cargo run --release --example mem_probe`).
 remote attack surface. CI runs both targets for a bounded 60 seconds per
 push as a regression gate; see `fuzz/README.md` for running a real campaign
 locally.
+
+### Checking a second implementation against the vectors
+
+`docs/CONFORMANCE_RUNNER.md` defines a small subprocess contract -- feed a
+JSON-Lines vector on stdin, get `PASS`/`FAIL <reason>` back on stdout -- so a
+second implementation can check itself against `docs/test-vectors.json`
+without hand-writing a harness. `tools/run_conformance.py` (stdlib-only
+Python) drives any program that speaks it:
+
+```bash
+python3 tools/run_conformance.py -- cargo run --quiet --bin catp-conformance-iut
+```
+
+`catp-conformance-iut` is this crate's own reference implementation of that
+contract, useful as a worked example and for exercising the driver in this
+repository's own CI; it is not a substitute for `cargo test`'s conformance
+suite (`tests/vectors.rs`), which remains this crate's authority on its own
+conformance.
 
 ## Contributing
 
