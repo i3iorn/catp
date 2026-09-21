@@ -32,6 +32,7 @@ subtle = "2"
 zeroize = { version = "1", features = ["derive"] }
 siphasher = { version = "1.0.3", default-features = false }
 chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["alloc"] }
+getrandom = "0.4.3"
 
 [[bin]]
 name = "catp-sender"
@@ -44,6 +45,10 @@ path = "src/bin/collector.rs"
 [[bin]]
 name = "catp-vectors"
 path = "src/bin/vectors.rs"
+
+[[bin]]
+name = "catp-provision"
+path = "src/bin/provision.rs"
 
 [dev-dependencies]
 criterion = "0.8.2"

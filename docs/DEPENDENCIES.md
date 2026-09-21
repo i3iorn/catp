@@ -15,10 +15,11 @@ subtle            2
 zeroize           1 (+derive)
 siphasher         1
 chacha20poly1305  0.11 (+alloc)
+getrandom         0.4
 ```
 
-`subtle`, `zeroize`, and `siphasher` are 1.x; `hmac`, `sha2`, `hkdf`, and
-`chacha20poly1305` are pre-1.0.
+`subtle`, `zeroize`, and `siphasher` are 1.x; `hmac`, `sha2`, `hkdf`,
+`chacha20poly1305`, and `getrandom` are pre-1.0.
 
 `siphasher` (cipher `0x02`, PROTOCOL.md §7.2/§8.1, issue #33) is a single
 pure-Rust implementation with no further transitive dependencies of its own —
@@ -33,6 +34,14 @@ deterministic, derived from `datagram_offset`) and `zeroize` (already a
 direct dependency for other reasons, wired in separately). It brings in
 `chacha20`, `poly1305`, `cipher`, `aead`, `inout`, and `universal-hash` as its
 own transitive tree.
+
+`getrandom` (`catp-provision`, issue #34 — generating a fresh `sender_id` and
+`device_secret` needs an actual OS CSPRNG, not a crate substitute) is used
+directly (`getrandom::u32()`, `getrandom::fill()`) with default features. It
+is not linked into the library or the wire-facing binaries (`catp-sender`,
+`catp-collector`, `catp-vectors`) at all — only `catp-provision` calls it —
+and brings in only `libc` (Unix) or `r-efi` (UEFI) transitively; no `std`
+feature is needed for the platforms this project targets.
 
 ## Pre-1.0 RustCrypto is accepted, deliberately
 

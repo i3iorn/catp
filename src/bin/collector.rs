@@ -7,9 +7,11 @@
 //! failure (surfaced here as a local counter, per 6.8), and per-epoch replay
 //! windows for the two-epoch acceptance window of 9.3.
 
+use catp::provisioning::load_bundles_dir;
 use catp::wire::PeerConfig;
 use catp::*;
 use std::net::UdpSocket;
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const SENDER_ID: u32 = 0x0000_1234;
@@ -129,37 +131,60 @@ fn render(r: &Record) -> String {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let bind = args.get(1).cloned().unwrap_or_else(|| "127.0.0.1:9999".into());
+    let bundle_dir = args.get(2);
 
     // A real collector serves many nodes; state is allocated here at
     // provisioning time, never on first contact (PROTOCOL.md 12.5).
     let mut collector = Collector::new();
-    collector
-        .provision(PeerConfig {
-            sender_id: SENDER_ID,
-            secret: DeviceSecret::new(SECRET),
-            cipher: CIPHER,
-            layouts: vec![
-                (Format::None as u8, SENSOR_SCHEMA),
-                (Format::None as u8, EVENT_SCHEMA),
-                (Format::None as u8, ALARM_SCHEMA),
-                // Without this pair the unstructured records are discarded
-                // unread, exactly like any other layout the receiver does not
-                // hold (PROTOCOL.md 6.4.2.2).
-                (Format::None as u8, UNSTRUCTURED),
-            ],
-            // Mandatory for CIPHER's 4-byte tag: without this, provision()
-            // itself refuses (PROTOCOL.md 8.1.1). RECOMMENDED_DEFAULT is the
-            // 128/sec §10.3 names.
-            inbound_rate_limit: Some(RateLimit::RECOMMENDED_DEFAULT),
-        })
-        .expect("CIPHER requires an inbound_rate_limit, and one is configured above");
+
+    match bundle_dir {
+        // Bulk-provision from `catp-provision`-generated bundles (PROTOCOL.md
+        // 12.5). Each bundle already carries its own cipher and layouts, so
+        // unlike the demo peer below, nothing here is hardcoded per node.
+        Some(dir) => {
+            let bundles = load_bundles_dir(Path::new(dir))?;
+            let count = bundles.len();
+            for b in bundles {
+                let sender_id = b.sender_id;
+                let cfg = b.into_peer_config(Some(RateLimit::RECOMMENDED_DEFAULT))?;
+                collector
+                    .provision(cfg)
+                    .unwrap_or_else(|e| panic!("bundle for sender_id 0x{sender_id:08X}: {e:?}"));
+            }
+            eprintln!("catp-collector on {bind}  provisioned {count} peer(s) from {dir}");
+        }
+        // No bundle directory given: fall back to a single hardcoded demo
+        // peer so `cargo run --bin catp-collector` still works standalone.
+        None => {
+            collector
+                .provision(PeerConfig {
+                    sender_id: SENDER_ID,
+                    secret: DeviceSecret::new(SECRET),
+                    cipher: CIPHER,
+                    layouts: vec![
+                        (Format::None as u8, SENSOR_SCHEMA),
+                        (Format::None as u8, EVENT_SCHEMA),
+                        (Format::None as u8, ALARM_SCHEMA),
+                        // Without this pair the unstructured records are
+                        // discarded unread, exactly like any other layout the
+                        // receiver does not hold (PROTOCOL.md 6.4.2.2).
+                        (Format::None as u8, UNSTRUCTURED),
+                    ],
+                    // Mandatory for CIPHER's 4-byte tag: without this,
+                    // provision() itself refuses (PROTOCOL.md 8.1.1).
+                    // RECOMMENDED_DEFAULT is the 128/sec §10.3 names.
+                    inbound_rate_limit: Some(RateLimit::RECOMMENDED_DEFAULT),
+                })
+                .expect("CIPHER requires an inbound_rate_limit, and one is configured above");
+            eprintln!(
+                "catp-collector on {bind}  sender_id=0x{SENDER_ID:08X} cipher=0x{:02X} \
+                 layouts=(NONE,v{SENSOR_SCHEMA}/v{EVENT_SCHEMA}/v{ALARM_SCHEMA}/v{UNSTRUCTURED})",
+                CIPHER as u8
+            );
+        }
+    }
 
     let sock = UdpSocket::bind(&bind)?;
-    eprintln!(
-        "catp-collector on {bind}  sender_id=0x{SENDER_ID:08X} cipher=0x{:02X} \
-         layouts=(NONE,v{SENSOR_SCHEMA}/v{EVENT_SCHEMA}/v{ALARM_SCHEMA}/v{UNSTRUCTURED})",
-        CIPHER as u8
-    );
 
     let mut buf = [0u8; 2048];
     let mut printed = 0u64;
