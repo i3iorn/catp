@@ -7,6 +7,14 @@ acceptance.
 
 ## Direct dependencies today
 
+Two packages, one workspace (issue #74): `catp` (the library, this
+repository's root `Cargo.toml`) and `catp-tools` (`tools/`, the five
+binaries). Only `catp`'s dependency list matters for the `no_std` build --
+`catp-tools` is a plain `std` binary crate and never builds for a
+constrained target.
+
+`catp`:
+
 ```
 hmac              0.13
 sha2              0.11 (no default features)
@@ -15,7 +23,13 @@ subtle            2   (no default features)
 zeroize           1   (no default features, +derive)
 siphasher         1   (no default features)
 chacha20poly1305  0.11 (no default features, +alloc)
-getrandom         0.4  (optional -- see "no_std / alloc", below)
+```
+
+`catp-tools`:
+
+```
+catp       (path dependency on the workspace's own library, features = ["std"])
+getrandom  0.4
 ```
 
 `subtle`, `zeroize`, and `siphasher` are 1.x; `hmac`, `sha2`, `hkdf`,
@@ -41,20 +55,22 @@ directly (`getrandom::u32()`, `getrandom::fill()`). It is not linked into the
 library itself or the wire-facing binaries (`catp-sender`, `catp-collector`,
 `catp-vectors`) at all — only `catp-provision` calls it — and brings in only
 `libc` (Unix) or `r-efi` (UEFI) transitively; no `std` feature is needed for
-the platforms this project targets. It is `optional = true`, gated by a
-feature of the same name (on by default — see below), because Cargo resolves
-a package's `[dependencies]` as a whole regardless of which target is being
-built: left non-optional, `getrandom` broke a `no_std` library-only build
-outright, since no backend exists for it on a bare-metal target without a
-custom one.
+the platforms this project targets. It lives entirely in `catp-tools`'s own
+`Cargo.toml` (issue #74), not `catp`'s: before the workspace split it had to
+be an `optional = true` dependency of the single shared package, because
+Cargo resolves a package's `[dependencies]` as a whole regardless of which
+target is being built, and left non-optional it broke a `no_std`
+library-only build outright (no backend exists for it on a bare-metal
+target without a custom one). Splitting the binaries into their own package
+removed the need for that workaround: `getrandom` is no longer part of
+`catp`'s dependency graph at all, optional or not.
 
 ## `no_std` / `alloc` (issue #37)
 
 ```toml
 [features]
-default = ["std", "getrandom"]
+default = ["std"]
 std = []
-getrandom = ["dep:getrandom"]
 ```
 
 Without the `std` feature, the crate is `#![no_std]` — but still links
@@ -65,6 +81,15 @@ codec, key schedule, replay window, and pacer — everything a constrained
 target (`thumbv7em-none-eabihf`) with `--no-default-features`. `Collector`
 (the multi-peer, host-side registry — a node never needs it) and
 `catp::provisioning` (file I/O) are both `#[cfg(feature = "std")]`-gated.
+
+CI checks this directly (`.github/workflows/ci.yml`, `no-std` job):
+`cargo build --package catp --no-default-features --target
+thumbv7em-none-eabihf`. It's a build-only smoke check — nothing in CI can
+run a Cortex-M4/M4F binary, so there's no test execution on that target —
+and it's scoped to just the `catp` package, which the workspace split
+(issue #74) makes trivial: `catp-tools`'s five `std`-only binaries live in
+a separate package now, so there's nothing for `--package catp` to
+accidentally pull in.
 
 This is the `alloc` tier of #37's two-tier split, not the allocation-free
 tier (issue #75): `Vec<u8>` throughout `Record`/`Datagram`/`Capability` still
@@ -96,7 +121,7 @@ this specific risk, and it's already enforced, not just documented.
 
 ## What a version bump requires
 
-1. `cargo test --all-targets` green, in particular `tests/vectors.rs` — if a
+1. `cargo test --workspace --all-targets` green, in particular `tests/vectors.rs` — if a
    bump changes any byte of `docs/test-vectors.txt`'s frozen output, that's a
    wire-format break and needs to be called out explicitly in the PR, not
    silently absorbed by regenerating the vectors.
@@ -120,11 +145,14 @@ growing that list is a real cost each time, not a free action.
   `Unicode-3.0` allowed — exactly what the current tree uses, nothing wider
   without deliberately updating the allow-list), and duplicate/banned-crate
   detection. Runs in CI (`.github/workflows/ci.yml`, `deny` job).
-- **`Cargo.lock` is committed.** Correct for a crate that ships binaries
-  (`catp-sender`, `catp-collector`, `catp-vectors`), and it's what makes the
-  vector suite reproducible. It does *not* pin what a downstream `[dependency]`
-  consumer resolves, though — a library consumer's build ignores this
-  repository's lock file, so the versions actually tested here and the
+- **`Cargo.lock` is committed.** One lockfile for the whole workspace (issue
+  #74), covering both `catp` and `catp-tools`'s binaries (`catp-sender`,
+  `catp-collector`, `catp-vectors`, `catp-provision`, `catp-conformance-iut`)
+  — that's what makes the vector suite reproducible. It does *not* pin what
+  a downstream `[dependency]` consumer resolves, though — a library
+  consumer depending on `catp` alone ignores this repository's lock file
+  (and never sees `catp-tools` or its dependencies at all, since it isn't a
+  dependency of the library), so the versions actually tested here and the
   versions a consumer's Cargo resolves can differ.
 - **`-Z minimal-versions` build** (nightly-only Cargo flag; `minimal-versions`
   job in CI, `continue-on-error: true` since it needs nightly and a floor

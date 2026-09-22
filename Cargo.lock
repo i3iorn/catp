@@ -75,13 +75,20 @@ version = "0.1.0"
 dependencies = [
  "chacha20poly1305",
  "criterion",
- "getrandom",
  "hkdf",
  "hmac",
  "sha2",
  "siphasher",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "catp-tools"
+version = "0.1.0"
+dependencies = [
+ "catp",
+ "getrandom",
 ]
 
 [[package]]

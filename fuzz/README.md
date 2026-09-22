@@ -16,7 +16,7 @@ remote attack surface of the protocol.
   the frozen vectors, checked here for whatever libFuzzer's mutations happen
   to get past authentication.
 
-Both use a fixed secret/`sender_id`/epoch matching `src/bin/vectors.rs`'s
+Both use a fixed secret/`sender_id`/epoch matching `tools/src/bin/vectors.rs`'s
 generator, so the seed corpus below (derived from `docs/test-vectors.txt`)
 starts libFuzzer from inputs that already decode successfully rather than
 dying at step 1.
