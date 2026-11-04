@@ -64,6 +64,9 @@ prerequisite. Section 11 addresses what a device does before it has one.
    - [9.2 Key derivation](#92-key-derivation)
    - [9.3 Epoch representation and acceptance window](#93-epoch-representation-and-acceptance-window)
    - [9.4 EPOCH_ANNOUNCE](#94-epoch_announce)
+     - [9.4.1 Direction and key](#941-direction-and-key)
+     - [9.4.2 Acceptance](#942-acceptance)
+     - [9.4.3 Delayed replay of a genuine announcement](#943-delayed-replay-of-a-genuine-announcement)
 10. [Datagram offset and replay protection](#10-datagram-offset-and-replay-protection)
     - [10.1 Semantics](#101-semantics)
     - [10.2 Replay window](#102-replay-window)
@@ -369,8 +372,9 @@ than giving the collector an identity of its own, is the security-preserving
 arrangement.
 
 All per-peer receiver state — `epoch_key` selection, replay windows
-(Section 10.2), and liveness timers — MUST be keyed on `sender_id` and MUST NOT
-be keyed on source IP address or UDP port. Network-layer addressing is outside
+(Section 10.2), and liveness timers — MUST be keyed on `sender_id`, on the
+`direction` byte where the state tracks directional traffic (Section 10.2),
+and MUST NOT be keyed on source IP address or UDP port. Network-layer addressing is outside
 the MAC scope, rewritten by NAT, and trivially spoofed; keying state on it would
 let an attacker create fresh state entries with empty replay windows simply by
 changing source port.
@@ -525,7 +529,7 @@ validated by the protocol.
 
 | Value         | Name                   | Description |
 |---------------|------------------------|---|
-| `0x10`        | `EPOCH_ANNOUNCE`       | Assert current key epoch (Section 9.4). |
+| `0x10`        | `EPOCH_ANNOUNCE`       | Assert current key epoch (Section 9.4). Collector to node only. |
 | `0x11`        | `TIME_ANNOUNCE`        | Cold-start time recovery (Section 11). |
 | `0x12`        | `TIME_REQUEST`         | Cold-start time recovery (Section 11). |
 | `0x13`        | `HEARTBEAT`            | Liveness signal. Empty payload. |
@@ -1154,11 +1158,19 @@ failure:
 3. `msg_type` is not `0x00` and is implemented.
 4. `sender_id` is known to the receiver.
 5. `cipher_id` is the suite configured for that `sender_id` (Section 8.3).
+   The time-recovery messages are exempt: Section 11.3 and Section 11.4
+   mandate `cipher_id` `0x01` for them regardless of the configured suite.
 6. `epoch_low` reconstructs (Section 9.3) to an `epoch_id` within the
-   acceptance window.
+   acceptance window. The time-recovery messages are exempt: they carry
+   `epoch_low` `0b0000` and authenticate over `epoch_id` `0x00000000`
+   (Section 11.2), and a clockless sender has no epoch to reconstruct.
 7. **MAC tag verifies**, using the key derived for that `sender_id` and the
    reconstructed `epoch_id`.
-8. `datagram_offset` passes the replay window check (Section 10.2).
+8. `datagram_offset` passes the replay window check (Section 10.2). The
+   time-recovery messages are exempt: their header offset is fixed at `0`
+   (Sections 11.3 and 11.4), and Section 11.3.1 is explicit that the window
+   cannot cover a message transmitted outside any epoch — rate limiting is
+   that domain's entire replay defence.
 9. The payload frames cleanly — into records for a record-framed type
    (Section 6.4.4), against the fixed layout for `NUMBER` (Section 6.3) or
    `SERIES` (Section 6.9), or against the fixed layout for a control type
@@ -1166,6 +1178,22 @@ failure:
 10. Records of unrecognized `(format, schema_version)` are skipped individually
     (Section 6.4.4). This is the only step that discards part of a datagram
     rather than all of it.
+
+**The time-recovery domain.** TIME_REQUEST and TIME_ANNOUNCE (Section 11)
+run steps 1–4 and step 7 with three substitutions, and are otherwise subject
+to this list: `cipher_id` is fixed at `0x01` (step 5's exception, above);
+`epoch_low` is fixed at `0b0000` and the `auth_header` names `epoch_id`
+`0x00000000`, so step 6 does not reconstruct; and step 8 does not run,
+because no epoch-relative window can express "already seen" for a message
+whose offset is fixed at `0`. The sender-side key is the `time_key`
+directional pair (Section 11.2) rather than an `epoch_key`, which is what
+step 7 verifies against. The exemptions exist because a cold-boot node has
+no clock: it cannot compute `local_epoch`, cannot reconstruct a candidate,
+and has no offset space to draw from. The clock state machine's own
+acceptance rules (Section 11.5) are the domain's replacement for steps 8–9:
+a verified announcement is still subject to rule 1 (discard if the clock is
+already valid) and rule 3 (reject rollback), which play the role the replay
+window plays for epoch-keyed traffic.
 
 Reserved bits appear nowhere in this list, and that is deliberate. Per
 Section 4.2 they are must-ignore: a receiver that branches on a bit it does not
@@ -1448,19 +1476,91 @@ Payload:
 
 The message asserts absolute state, never a delta. A relative instruction such
 as "advance by one" would desynchronize permanently on loss; an absolute
-assertion is idempotent under loss, duplication, and reordering.
+assertion is idempotent under loss, duplication, and reordering — subject to
+the delayed-replay case analyzed below, which is not idempotent and is the
+message's one residual exposure.
 
 No nonce field is present. `datagram_offset` already provides per-datagram
-replay protection, and the message is idempotent: a replayed announcement
-asserting already-accepted state changes nothing.
+replay protection for *accepted* datagrams: the replay window of Section 10.2
+rejects an exact replay of an announcement the receiver has already acted on.
+
+#### 9.4.1 Direction and key
+
+A node without a working clock cannot verify an announcement at all:
+verification derives the key from a reconstructed `epoch_id` (Section 9.3),
+and reconstruction needs a clock. Cold-start convergence is Section 11's job;
+this message is for nodes that have a clock and need to learn where the
+collector has moved.
+
+`EPOCH_ANNOUNCE` is collector-to-node. Only a collector transmits it, and only
+a node acts on it. A node MUST verify the announcement under the
+collector-to-node `epoch_key` (direction `0x01`, Section 9.2) for the
+datagram's reconstructed `epoch_id`, exactly as Section 7.4 prescribes; a
+node that instead accepts an announcement under the node-to-collector key has
+accepted a message its peer never sent. A collector MUST NOT act on an
+`EPOCH_ANNOUNCE` it receives: the message is defined for nodes, and the
+collector's announcement floor is its own knowledge of what it has asserted,
+not something a peer can raise. The receiver's announcement floor
+(Section 9.4.2) is therefore single-direction state by construction.
+
+#### 9.4.2 Acceptance
 
 Receivers MUST reject announcements whose `target_epoch` is at or below the
 highest previously accepted value from that `sender_id`. Without this check, an
 adversary holding an expired epoch key could replay an old announcement and
-force a return to compromised key material.
+force a return to compromised key material. The highest-accepted value is
+per-`sender_id`, per-direction state (Section 10.2), and it is not the
+cold-start `last_epoch` of Section 10.4: that floor records the last epoch the
+node itself operated in and gates `TIME_ANNOUNCE` recovery (Section 11.5 rule
+3); the announcement floor records what the collector has asserted and gates
+`EPOCH_ANNOUNCE` acceptance. The two are kept apart deliberately — an
+announcement that `target_epoch` `T` is current does not by itself license a
+cold-booting node to recover into `T`, and a node that has never operated past
+epoch `T - 1` has no reason to treat `T` as a rollback boundary for time
+recovery. Implementations SHOULD instrument the monotonic-check rejection
+count separately: a stream of stale announcements is visible to no one else.
+
+On a verified announcement whose `target_epoch` is strictly above the floor,
+the receiver records it as its new floor and takes no other action. In
+particular, a node MUST NOT adopt `target_epoch` as its working epoch while
+its own clock still reads an earlier epoch: Section 10.1 derives
+`datagram_offset` from wall-clock time, and a clock behind an adopted epoch
+would demand a negative offset the 19-bit field cannot represent. The
+announcement accelerates convergence in the only direction convergence can
+run — when the node's clock reaches `target_epoch` it rolls into it like any
+other boundary, and the floor stands ready for the announcements of epochs
+beyond it. A node whose floor runs ahead of its clock is in the same position
+as a node whose clock runs ahead of its collector's: it transmits under its
+current epoch and its traffic is accepted by a collector inside the
+two-epoch window (Section 9.3).
 
 Senders SHOULD transmit each announcement more than once, spaced over several
 seconds, rather than relying on a single datagram.
+
+#### 9.4.3 Delayed replay of a genuine announcement
+
+The idempotence above covers announcements of already-accepted state. An
+announcement the receiver has *never* accepted is a different case. An
+on-path attacker who blocks every copy of an announcement asserting
+`target_epoch = T + k` holds a genuine, MAC-valid datagram that the
+receiver's monotonic check will accept at any later moment while its floor
+is still below `T + k`: replayed then, it raises the floor to `T + k` at a
+time of the attacker's choosing, and the node will thenceforth reject every
+genuine announcement at or below `T + k` — including the ones the collector
+is still sending, which the attacker can also block.
+
+The exposure is real but bounded, and the bound is the one Section 12.5
+already prices in: an attacker who can block every copy of an announcement
+can block every datagram, and an attacker who can block every datagram can
+silence a node outright without any replay at all. Delayed replay adds no
+capability the same attacker does not already have; it adds persistence of
+the suppression (the node will refuse the announcement even after the
+attacker stops blocking, until the collector asserts a higher epoch) in
+exchange for no key material and no forgery. A deployment whose compromise
+response requires announcements to land SHOULD treat announcement delivery
+as it treats telemetry delivery — an on-path attacker can deny both — and
+SHOULD alarm on a sustained monotonic-check rejection rate, which is the
+one observable this attack produces.
 
 ---
 
@@ -1512,8 +1612,18 @@ Why one field serves as timestamp, sequence number, and nonce source is in
 
 ### 10.2 Replay window
 
-Receivers maintain, per `sender_id` and per epoch, the highest
-`datagram_offset` observed and a bitmap of recently seen values.
+Receivers maintain, per `sender_id`, per `epoch_id`, and per `direction`, the
+highest `datagram_offset` observed and a bitmap of recently seen values.
+
+The direction byte is part of the window key because it is part of the key
+schedule (Section 9.2.2) and of the no-reuse tuple (Section 10.1), and both
+endpoints of an association transmit under the same `sender_id`: a collector
+emits control datagrams at offsets drawn from its own clock while receiving
+node telemetry at offsets drawn from the node's, and a node does the reverse.
+Two offsets from opposite directions bear no relation to each other, so a
+window shared across directions would reject legitimate traffic as
+"below the window" the moment the two directions' clocks diverged at all.
+Offset-tracking state is per-direction for the same reason `epoch_key` is.
 
 Because Section 9.3 permits acceptance of both the current and the immediately
 preceding epoch, receivers MUST maintain a separate window for each. A single
@@ -1579,9 +1689,9 @@ network-layer limiting of Section 12.5.
 
 **Control messages.** `EPOCH_ANNOUNCE`, `HEARTBEAT`, and `CAPABILITY_ADVERTISE`
 consume offsets like any other datagram. Their retransmission schedules MUST fit
-within the sender's budget and MUST NOT be exempted from it. `TIME_ANNOUNCE` is
-the sole exception (Section 11.3), because it is transmitted when no epoch is in
-effect.
+within the sender's budget and MUST NOT be exempted from it. `TIME_REQUEST` and
+`TIME_ANNOUNCE` are the exceptions (Sections 11.3 and 11.4), because they are
+transmitted when no epoch is in effect.
 
 ### 10.4 Restart behaviour
 
@@ -1761,7 +1871,8 @@ Header constraints. A TIME_ANNOUNCE MUST carry:
   (Section 4.4).
 - `cipher_id` `0x01` (HMAC-SHA256, truncated). This is REQUIRED regardless of
   the suite configured for the association, and is the one place Section 8.3's
-  configured-suite check is relaxed.
+  configured-suite check is relaxed — the exception Section 7.4's step 5 now
+  names.
 - `epoch_low` `0b0000` and header `datagram_offset` `0`.
 
 Receivers MUST reject a TIME_ANNOUNCE violating any of these. The MAC is
@@ -1931,6 +2042,16 @@ how many distinct offsets are observed.
 Per-`sender_id` state is allocated at provisioning time, not on first contact.
 Receivers MUST NOT allocate state for an unknown `sender_id`, or an attacker can
 exhaust receiver memory by emitting datagrams with varying identifiers.
+
+The control plane adds one replay-shaped denial: Section 9.4.3 analyzes the
+delayed replay of a genuine `EPOCH_ANNOUNCE`, which suppresses future
+announcements without any key material. Its impact is strictly within the
+traffic-blocking an on-path attacker can already do, and its one observable —
+a sustained rate of announcements rejected by the monotonic check — is
+something an operator can alarm on. An attacker with no path position at all
+gains nothing: an off-path replay of an already-accepted announcement is
+idempotent, and even a delayed replay moves the floor only to an epoch the
+collector genuinely asserted — never beyond one, and never with key material.
 
 ### 12.6 Time synchronization
 

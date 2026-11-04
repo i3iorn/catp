@@ -8,9 +8,11 @@ use crate::*;
 /// A parsed control payload.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Control {
-    /// `EPOCH_ANNOUNCE` (`0x10`) — asserts an absolute epoch (PROTOCOL.md 9.4).
+    /// `EPOCH_ANNOUNCE` (`0x10`) — asserts an absolute epoch (PROTOCOL.md
+    /// 9.4). Collector to node only; nodes verify it under the
+    /// direction-`0x01` epoch key (PROTOCOL.md 9.4.1).
     EpochAnnounce { target_epoch: u32 },
-    /// `TIME_ANNOUNCE` (`0x11`) — cold-start time (PROTOCOL.md 11.3).
+    /// `TIME_ANNOUNCE` (`0x11`) — cold-start time (PROTOCOL.md 11.4).
     ///
     /// Never reached through [`crate::wire::decode`]: it is keyed on `time_key`
     /// rather than an epoch key, so it has its own entry point

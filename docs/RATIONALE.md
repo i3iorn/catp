@@ -365,3 +365,81 @@ prohibition is cheap and forecloses the question.
 
 ---
 
+## R14. Why the time-recovery domain is exempt from the verification order
+
+Justifies [PROTOCOL.md](PROTOCOL.md) §7.4's carve-out for
+TIME_REQUEST/TIME_ANNOUNCE.
+
+Section 7.4 is a MUST-ordered list, and a literal reading of it rejects every
+cold-start datagram: step 5 demands the configured suite, but Section 11
+mandates `cipher_id` 0x01; step 6 demands an epoch in the acceptance window,
+but a clockless node has no clock to compute candidates from and the time
+messages name epoch 0; step 8 demands a replay-window check, but the header
+offset is pinned at 0 and no window can express "already seen" for it.
+
+The alternative — renumbering the steps around a special case, or giving the
+time messages their own pipeline — would either clutter the main path with a
+domain most deployments never use, or fork the specification into two
+verification procedures that could drift. A single explicit exemption,
+stated once where the steps live and cross-referenced from Section 11, keeps
+one order for everything and makes the two differences (fixed cipher, no
+window) visible in the list itself. The clock state machine's rules
+(Section 11.5) are not a weaker substitute for the window: they are the
+window's analogue for a domain that has no offset space to window over.
+
+## R15. Why replay windows are keyed per direction
+
+Justifies [PROTOCOL.md](PROTOCOL.md) §10.2 (and §4.4's state-keying rule).
+
+Section 9.2.3 gives the collector no identity of its own: both directions of
+an association key on the node's `sender_id`, separated only by the
+`direction` byte. That means both endpoints transmit under the same on-wire
+identifier — the collector's control datagrams and the node's telemetry are
+indistinguishable by name. Offsets in the two directions are drawn from two
+independent clocks, so they are two independent sequences, and one bitmap
+over both is a bitmap over noise: the first time the collector's offset
+high-water mark ran ahead of the node's, the node's legitimate traffic would
+fail as "below the window".
+
+Windowing per `(sender_id, epoch_id, direction)` costs nothing — the state
+was per-epoch anyway — and makes the window's domain match the no-reuse
+tuple's, which is the invariant the whole replay argument rests on. A
+receiver that only ever listens to one direction (the collector in the
+reference deployment) maintains one window per `(sender_id, epoch)` and is
+conformant as written; the rule earns its keep the moment a node-side
+receiver also listens to its collector.
+
+## R16. Why EPOCH_ANNOUNCE raises a floor instead of adopting an epoch
+
+Justifies [PROTOCOL.md](PROTOCOL.md) §9.4.
+
+Two design questions the original draft left open: what acceptance *does*,
+and what a node behind the target is supposed to do about its offsets.
+
+Adopting `target_epoch` as the working epoch is the tempting answer, and it
+is broken by the offset formula: `datagram_offset` is derived from wall-clock
+time (Section 10.1), so a node whose clock reads an earlier epoch cannot
+transmit under an adopted later one — every offset would be negative, in a
+field that is 19 unsigned bits. Making the offset derivable from an adopted
+epoch instead would reintroduce the counter problem R6 retired: a value that
+must survive reboot, cannot rewind, and no longer means anything.
+
+Raising only a floor keeps the clock as the single source of epoch truth.
+The announcement accelerates convergence in the only direction it can run —
+the node's clock is already moving toward the target — and a node whose
+floor runs ahead of its clock is in exactly the position the two-epoch
+acceptance window already absorbs. It also keeps `EPOCH_ANNOUNCE` and the
+cold-start `last_epoch` separate: one records what the collector has
+asserted, the other what the node itself has operated in, and merging them
+would make an announcement suppress legitimate time recovery into the
+still-current epoch.
+
+The residual — delayed replay of a never-accepted announcement
+(Section 9.4.3) — is accepted rather than engineered away because any
+mechanism that defeats it (a nonce, a window over announcement state, a
+challenge) reintroduces round trips or negotiated state for a message that
+exists precisely because out-of-band convergence must survive nodes that
+cannot hear the collector. The exposure is bounded by an attacker the
+protocol already prices in: one who can block datagrams at all. A receiver
+counter on monotonic-check rejections makes the attempt visible, which is
+the most an out-of-band mechanism can honestly promise.
