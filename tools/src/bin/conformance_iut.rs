@@ -165,13 +165,26 @@ fn check_accept(m: &HashMap<String, String>) -> Result<(), String> {
         layouts: permissive_layouts(),
         inbound_rate_limit: None,
     };
-    let mut window = ReplayWindow::one_second();
+    let mut window: ReplayWindow = ReplayWindow::one_second();
     let acc = decode(&wire, &peer, epoch, dir, &mut window)
         .map_err(|e| format!("decode rejected: {e:?}"))?;
 
+    // Re-encode under the epoch the datagram actually reconstructed to, which
+    // for a cross-epoch vector (`encode_epoch` present) is not the receiver's
+    // own epoch (PROTOCOL.md 9.3's `{rx-1, rx}` window).
+    let enc_epoch: u32 = match m.get("encode_epoch") {
+        Some(s) => s.parse().map_err(|_| "bad encode_epoch".to_string())?,
+        None => epoch,
+    };
+    if acc.epoch_id != enc_epoch {
+        return Err(format!(
+            "reencode mismatch: reconstructed epoch {} != encode_epoch {enc_epoch}",
+            acc.epoch_id
+        ));
+    }
     let again = acc
         .datagram
-        .encode(&secret, epoch, dir, u16::MAX as usize)
+        .encode(&secret, acc.epoch_id, dir, u16::MAX as usize)
         .map_err(|e| format!("reencode failed: {e:?}"))?;
     if again != wire {
         return Err("reencode mismatch".into());
@@ -233,12 +246,109 @@ fn check_number_payload(m: &HashMap<String, String>) -> Result<(), String> {
     Ok(())
 }
 
+fn check_reject_datagram(m: &HashMap<String, String>) -> Result<(), String> {
+    let secret = DeviceSecret::new(
+        unhex(&m["device_secret"])
+            .try_into()
+            .map_err(|_| "device_secret not 32 bytes".to_string())?,
+    );
+    let receiver_sender = u32::from_str_radix(&m["receiver_sender"], 16)
+        .map_err(|_| "bad receiver_sender".to_string())?;
+    let receiver_epoch: u32 = m["receiver_epoch"]
+        .parse()
+        .map_err(|_| "bad receiver_epoch".to_string())?;
+    let configured = unhex(&m["configured_cipher"]);
+    let cipher = CipherId::from_u8(*configured.first().ok_or("missing configured_cipher")?)
+        .ok_or("configured_cipher unimplemented")?;
+    let dir = match unhex(&m["direction"]).first() {
+        Some(0x00) => Direction::NodeToCollector,
+        Some(_) => Direction::CollectorToNode,
+        None => return Err("missing direction".into()),
+    };
+    let wire = unhex(&m["wire"]);
+
+    let peer = PeerConfig {
+        sender_id: receiver_sender,
+        secret: secret.clone(),
+        cipher,
+        layouts: permissive_layouts(),
+        inbound_rate_limit: None,
+    };
+    let mut window = ReplayWindow::one_second();
+    // Seed the replay window with the offsets the vector says the receiver has
+    // already accepted, so replay / below-window vectors express their state.
+    if let Some(seen) = m.get("seen_offsets") {
+        for o in seen.split(',') {
+            let o: u32 = o.parse().map_err(|_| "bad seen_offsets".to_string())?;
+            window
+                .check_and_set(o)
+                .map_err(|e| format!("seeding seen offset {o} failed: {e:?}"))?;
+        }
+    }
+    if decode(&wire, &peer, receiver_epoch, dir, &mut window).is_ok() {
+        return Err(format!(
+            "wrong outcome: decode accepted a {} vector",
+            m.get("fault").map(String::as_str).unwrap_or("?")
+        ));
+    }
+    Ok(())
+}
+
+fn check_series_payload(m: &HashMap<String, String>) -> Result<(), String> {
+    let payload = unhex(&m["payload"]);
+    let anchor: u32 = m["anchor_offset"]
+        .parse()
+        .map_err(|_| "bad anchor_offset".to_string())?;
+    let want_accept = m["outcome"] == "accept";
+    let got_accept = validate_series(&payload, anchor).is_ok();
+    if got_accept != want_accept {
+        return Err(format!("wrong outcome: expected {}", m["outcome"]));
+    }
+    Ok(())
+}
+
+fn check_reject_time_announce(m: &HashMap<String, String>) -> Result<(), String> {
+    let secret = DeviceSecret::new(
+        unhex(&m["device_secret"])
+            .try_into()
+            .map_err(|_| "device_secret not 32 bytes".to_string())?,
+    );
+    let sender_id = u32::from_str_radix(&m["sender_id"], 16).map_err(|e| e.to_string())?;
+    let wire = unhex(&m["wire"]);
+    let asserted_time: i64 = m["asserted_time"]
+        .parse()
+        .map_err(|_| "bad asserted_time".to_string())?;
+    let last_epoch: u32 = m["last_epoch"]
+        .parse()
+        .map_err(|_| "bad last_epoch".to_string())?;
+
+    // The MAC is genuine; the wire must verify first. The rejection the vector
+    // encodes happens in the node's clock state machine (PROTOCOL.md 11.5).
+    decode_time_announce(&wire, sender_id, &secret)
+        .map_err(|e| format!("wire should have verified: {e:?}"))?;
+    let mut clock = match m["clock_state"].as_str() {
+        "cold" => NodeClock::clockless(last_epoch),
+        "valid" => NodeClock::synced(last_epoch),
+        other => return Err(format!("unknown clock_state {other:?}")),
+    };
+    if clock
+        .accept_time_announce(asserted_time, asserted_time - 5)
+        .is_ok()
+    {
+        return Err("wrong outcome: announce was accepted".into());
+    }
+    Ok(())
+}
+
 fn verdict_of(m: &HashMap<String, String>) -> String {
     let result = match m.get("kind").map(String::as_str) {
         Some("accept") => check_accept(m),
         Some("accept_time_request") => check_accept_time_request(m),
         Some("accept_time_announce") => check_accept_time_announce(m),
         Some("number_payload") => check_number_payload(m),
+        Some("reject_datagram") => check_reject_datagram(m),
+        Some("series_payload") => check_series_payload(m),
+        Some("reject_time_announce") => check_reject_time_announce(m),
         Some(other) => Err(format!("unrecognized kind {other:?}")),
         None => Err("missing kind".into()),
     };
