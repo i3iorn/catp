@@ -19,6 +19,10 @@ fn unhex(s: &str) -> Vec<u8> {
         .collect()
 }
 
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
 /// A minimal JSON parser, only as general as `docs/test-vectors.json` needs:
 /// a top-level array of flat objects whose values are strings or bare
 /// integers. Not a general-purpose parser -- no dependency is worth adding
@@ -174,6 +178,12 @@ fn every_accept_vector_verifies_and_reencodes() {
         let secret = DeviceSecret::new(unhex(&m["device_secret"]).try_into().unwrap());
         let sender_id = u32::from_str_radix(&m["sender_id"], 16).unwrap();
         let epoch: u32 = m["epoch_id"].parse().unwrap();
+        // Cross-epoch vectors (PROTOCOL.md 9.3's `{rx-1, rx}` window) carry the
+        // epoch the datagram was encoded under separately from the receiver's.
+        let enc_epoch: u32 = match m.get("encode_epoch") {
+            Some(s) => s.parse().unwrap(),
+            None => epoch,
+        };
         let dir = match unhex(&m["direction"])[0] {
             0x00 => Direction::NodeToCollector,
             _ => Direction::CollectorToNode,
@@ -189,7 +199,7 @@ fn every_accept_vector_verifies_and_reencodes() {
 
         // The published epoch_key and auth_header must match what we derive.
         assert_eq!(
-            secret.epoch_key(sender_id, epoch, dir).to_vec(),
+            secret.epoch_key(sender_id, enc_epoch, dir).to_vec(),
             unhex(&m["epoch_key"]),
             "epoch_key drifted"
         );
@@ -210,18 +220,18 @@ fn every_accept_vector_verifies_and_reencodes() {
             .unwrap_or_else(|e| panic!("vector failed to decode: {e:?}"));
 
         assert_eq!(acc.datagram.sender_id, sender_id);
-        assert_eq!(acc.epoch_id, epoch);
+        assert_eq!(acc.epoch_id, enc_epoch);
         assert_eq!(acc.datagram_offset, m["offset"].parse::<u32>().unwrap());
         assert_eq!(acc.datagram.msg_type, unhex(&m["msg_type"])[0]);
         assert_eq!(
-            acc.datagram.auth_header(epoch).to_vec(),
+            acc.datagram.auth_header(enc_epoch).to_vec(),
             unhex(&m["auth_header"])
         );
 
-        // Re-encode and compare byte for byte.
+        // Re-encode under the reconstructed epoch and compare byte for byte.
         let again = acc
             .datagram
-            .encode(&secret, epoch, dir, 65535)
+            .encode(&secret, acc.epoch_id, dir, 65535)
             .expect("re-encode must succeed");
         assert_eq!(again, wire, "re-encoding did not reproduce the vector");
         checked += 1;
@@ -229,40 +239,149 @@ fn every_accept_vector_verifies_and_reencodes() {
     assert!(checked >= 20, "only {checked} vectors exercised");
 }
 
-/// Reserved bits are must-ignore: the vector with all five set must decode to
-/// the same application content as one with none set (PROTOCOL.md 4.2).
+/// Reserved bits are must-ignore: every non-zero value (§14.1 requires the
+/// frozen set to carry one vector per value) must decode to the same
+/// application content as a baseline with none set (PROTOCOL.md 4.2).
 #[test]
-fn reserved_bit_vector_is_ignored_not_rejected() {
-    let m = blocks()
+fn reserved_bit_vectors_are_ignored_not_rejected() {
+    let sweep: Vec<_> = blocks()
         .into_iter()
-        .find(|m| m.get("offset").map(String::as_str) == Some("8") && m.contains_key("wire"))
-        .expect("reserved-bits vector missing");
-    let wire = unhex(&m["wire"]);
-    // Byte 2 holds reserved in its high 5 bits.
-    assert_eq!(
-        wire[2] >> 3,
-        0x1F,
-        "vector should have all reserved bits set"
-    );
-
-    let secret = DeviceSecret::new(unhex(&m["device_secret"]).try_into().unwrap());
+        .filter(|m| m.get("offset").map(String::as_str) == Some("8") && m.contains_key("wire"))
+        .collect();
+    assert_eq!(sweep.len(), 31, "expected one vector per non-zero value");
+    let secret = DeviceSecret::new(unhex(&sweep[0]["device_secret"]).try_into().unwrap());
     let peer = PeerConfig {
-        sender_id: u32::from_str_radix(&m["sender_id"], 16).unwrap(),
+        sender_id: u32::from_str_radix(&sweep[0]["sender_id"], 16).unwrap(),
         secret,
-        cipher: CipherId::from_u8(unhex(&m["cipher_id"])[0]).unwrap(),
+        cipher: CipherId::from_u8(unhex(&sweep[0]["cipher_id"])[0]).unwrap(),
         layouts: vec![],
         inbound_rate_limit: None, // decode() called directly; bypasses PeerState
     };
-    let mut w = ReplayWindow::one_second();
-    let acc = decode(
-        &wire,
-        &peer,
-        m["epoch_id"].parse().unwrap(),
-        Direction::NodeToCollector,
-        &mut w,
-    )
-    .expect("reserved bits must not cause rejection");
-    assert_eq!(acc.datagram.number_value(), Some((1, 10))); // 10 * 10^-1 = 1.0
+    let mut last_value = 0u8;
+    for m in &sweep {
+        let wire = unhex(&m["wire"]);
+        // Byte 2 holds reserved in its high 5 bits; the sweep covers 0x01..0x1F
+        // exactly once each, in ascending order.
+        let value = wire[2] >> 3;
+        assert_eq!(value, last_value + 1, "sweep mismatch: {m:?}");
+        last_value = value;
+        let mut w = ReplayWindow::one_second();
+        let acc = decode(
+            &wire,
+            &peer,
+            m["epoch_id"].parse().unwrap(),
+            Direction::NodeToCollector,
+            &mut w,
+        )
+        .expect("reserved bits must not cause rejection");
+        assert_eq!(acc.datagram.number_value(), Some((1, 10))); // 10 * 10^-1 = 1.0
+    }
+}
+
+/// Every `reject_datagram` vector must be rejected by the reference §7.4
+/// pipeline given the receiver state the vector spells out (PROTOCOL.md 14.1).
+#[test]
+fn every_reject_datagram_vector_is_rejected() {
+    let rejects: Vec<_> = blocks()
+        .into_iter()
+        .filter(|m| m.get("kind").map(String::as_str) == Some("reject_datagram"))
+        .collect();
+    assert!(
+        rejects.len() >= 16,
+        "§7.4 paths + §6.4.4 framing faults missing: {len}",
+        len = rejects.len()
+    );
+    for m in &rejects {
+        let secret = DeviceSecret::new(unhex(&m["device_secret"]).try_into().unwrap());
+        let receiver_sender = u32::from_str_radix(&m["receiver_sender"], 16).unwrap();
+        let receiver_epoch: u32 = m["receiver_epoch"].parse().unwrap();
+        let cipher = CipherId::from_u8(unhex(&m["configured_cipher"])[0]).unwrap();
+        let dir = match unhex(&m["direction"])[0] {
+            0x00 => Direction::NodeToCollector,
+            _ => Direction::CollectorToNode,
+        };
+        let wire = unhex(&m["wire"]);
+        let peer = PeerConfig {
+            sender_id: receiver_sender,
+            secret: secret.clone(),
+            cipher,
+            layouts: (1u8..=6)
+                .flat_map(|f| (0u8..=255).map(move |s| (f, s)))
+                .collect(),
+            inbound_rate_limit: None,
+        };
+        let mut w = ReplayWindow::one_second();
+        if let Some(seen) = m.get("seen_offsets") {
+            for o in seen.split(',') {
+                w.check_and_set(o.parse().unwrap()).unwrap();
+            }
+        }
+        let fault = m.get("fault").map(String::as_str).unwrap_or("?");
+        assert!(
+            decode(&wire, &peer, receiver_epoch, dir, &mut w).is_err(),
+            "fault {fault:?} was accepted"
+        );
+    }
+}
+
+/// Every `series_payload` vector's outcome must match `validate_series`
+/// against the anchor it names (PROTOCOL.md 6.9, 14.1).
+#[test]
+fn series_grammar_matches_the_vectors() {
+    // `series_payload` vectors are scalar lines without their own "# name"
+    // block, so this one reads the JSON mirror directly.
+    let json_text = std::fs::read_to_string("docs/test-vectors.json")
+        .expect("docs/test-vectors.json missing; run `cargo run --bin catp-vectors`");
+    let mut accepts = 0;
+    let mut rejects = 0;
+    for m in tinyjson::parse_array_of_objects(&json_text) {
+        if m.get("kind").map(String::as_str) != Some("series_payload") {
+            continue;
+        }
+        let payload = unhex(&m["payload"]);
+        let anchor: u32 = m["anchor_offset"].parse().unwrap();
+        let ok = validate_series(&payload, anchor).is_ok();
+        assert_eq!(
+            ok,
+            m["outcome"] == "accept",
+            "series payload {} outcome mismatch",
+            hex(&payload)
+        );
+        if ok {
+            accepts += 1;
+        } else {
+            rejects += 1;
+        }
+    }
+    assert!(accepts >= 3 && rejects >= 5, "SERIES vectors look thin");
+}
+
+/// Every `reject_time_announce` vector must verify as a MAC-genuine
+/// announcement and then be rejected by the node's clock rules (§11.5).
+#[test]
+fn cold_start_reject_vectors_are_rejected() {
+    let rejects: Vec<_> = blocks()
+        .into_iter()
+        .filter(|m| m.get("kind").map(String::as_str) == Some("reject_time_announce"))
+        .collect();
+    assert_eq!(rejects.len(), 2, "expected both 11.5 rejection vectors");
+    for m in &rejects {
+        let secret = DeviceSecret::new(unhex(&m["device_secret"]).try_into().unwrap());
+        let sender_id = u32::from_str_radix(&m["sender_id"], 16).unwrap();
+        let wire = unhex(&m["wire"]);
+        let asserted: i64 = m["asserted_time"].parse().unwrap();
+        let last_epoch: u32 = m["last_epoch"].parse().unwrap();
+        decode_time_announce(&wire, sender_id, &secret).expect("MAC must verify");
+        let mut clock = match m["clock_state"].as_str() {
+            "cold" => NodeClock::clockless(last_epoch),
+            _ => NodeClock::synced(last_epoch),
+        };
+        assert!(
+            clock.accept_time_announce(asserted, asserted - 5).is_err(),
+            "{:?} announce was accepted",
+            m.get("name")
+        );
+    }
 }
 
 /// The TIME_ANNOUNCE vector verifies under its own key schedule.

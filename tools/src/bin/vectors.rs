@@ -65,16 +65,35 @@ fn accept(
     dir: Direction,
     dg: &Datagram,
 ) {
+    accept_cross(json, name, secret, epoch, epoch, dir, dg);
+}
+
+/// As `accept`, but the datagram was *encoded* under `enc_epoch` while the
+/// receiver sits at `rx_epoch` (PROTOCOL.md 9.3 accepts `{rx-1, rx}`). When
+/// the two differ the vector carries an `encode_epoch` field; consumers derive
+/// keys and re-encode from it, and treat `epoch_id` as the receiver's clock.
+fn accept_cross(
+    json: &mut JsonVectors,
+    name: &str,
+    secret: &DeviceSecret,
+    enc_epoch: u32,
+    rx_epoch: u32,
+    dir: Direction,
+    dg: &Datagram,
+) {
     let wire = dg
-        .encode(secret, epoch, dir, 65535)
+        .encode(secret, enc_epoch, dir, 65535)
         .expect("vector must encode");
-    let key = secret.epoch_key(dg.sender_id, epoch, dir);
-    let auth_header = dg.auth_header(epoch);
+    let key = secret.epoch_key(dg.sender_id, enc_epoch, dir);
+    let auth_header = dg.auth_header(enc_epoch);
     println!("# {name}");
     println!("kind         accept");
     println!("device_secret {}", hex(secret.expose_secret()));
     println!("sender_id    {:08x}", dg.sender_id);
-    println!("epoch_id     {epoch}");
+    println!("epoch_id     {rx_epoch}");
+    if enc_epoch != rx_epoch {
+        println!("encode_epoch {enc_epoch}");
+    }
     println!("direction    {:02x}", dir as u8);
     println!("cipher_id    {:02x}", dg.cipher_id);
     println!("msg_type     {:02x}", dg.msg_type);
@@ -84,18 +103,213 @@ fn accept(
     println!("wire         {}", hex(&wire));
     println!("wire_len     {}", wire.len());
     println!();
-    json.push(&[
+    let mut fields = vec![
         ("name", json_str(name)),
         ("kind", json_str("accept")),
         ("device_secret", json_str(&hex(secret.expose_secret()))),
         ("sender_id", json_str(&format!("{:08x}", dg.sender_id))),
-        ("epoch_id", epoch.to_string()),
+        ("epoch_id", rx_epoch.to_string()),
+    ];
+    if enc_epoch != rx_epoch {
+        fields.push(("encode_epoch", enc_epoch.to_string()));
+    }
+    fields.extend_from_slice(&[
         ("direction", json_str(&format!("{:02x}", dir as u8))),
         ("cipher_id", json_str(&format!("{:02x}", dg.cipher_id))),
         ("msg_type", json_str(&format!("{:02x}", dg.msg_type))),
         ("offset", dg.datagram_offset.to_string()),
         ("epoch_key", json_str(&hex(&key[..]))),
         ("auth_header", json_str(&hex(&auth_header))),
+        ("wire", json_str(&hex(&wire))),
+        ("wire_len", wire.len().to_string()),
+    ]);
+    json.push(&fields);
+}
+
+/// The receiver state a `reject_datagram` vector tells the IUT to assume
+/// (docs/CONFORMANCE_RUNNER.md). Everything the §7.4 pipeline needs beyond the
+/// wire bytes itself.
+#[derive(Clone)]
+struct Receiver {
+    /// Sender the IUT is provisioned for; defaults to the wire's `sender_id`
+    /// (only the `unknown_sender` fault sets something else).
+    sender_id: u32,
+    /// The receiver's current epoch, for §9.3 reconstruction.
+    epoch: u32,
+    /// The cipher suite the IUT configured for this sender.
+    cipher: CipherId,
+    /// Offsets the IUT must seed its replay window with before checking.
+    seen_offsets: Vec<u32>,
+}
+
+impl Receiver {
+    fn for_wire(d: &Datagram, epoch: u32) -> Self {
+        Self {
+            sender_id: d.sender_id,
+            epoch,
+            cipher: CipherId::from_u8(d.cipher_id).expect("vector cipher implemented"),
+            seen_offsets: Vec::new(),
+        }
+    }
+}
+
+/// Emit a `reject_datagram` vector: authentic-or-not wire bytes plus receiver
+/// state; PASS means the IUT's §7.4 pipeline rejects (PROTOCOL.md 14.1).
+fn reject_datagram(
+    json: &mut JsonVectors,
+    name: &str,
+    secret: &DeviceSecret,
+    wire: &[u8],
+    fault: &str,
+    receiver: &Receiver,
+) {
+    println!("# {name}");
+    println!("kind             reject_datagram");
+    println!("fault            {fault}");
+    println!("device_secret    {}", hex(secret.expose_secret()));
+    println!("sender_id        {:08x}", sender_id_of(wire));
+    println!("receiver_sender  {:08x}", receiver.sender_id);
+    println!("receiver_epoch   {}", receiver.epoch);
+    println!("configured_cipher {:02x}", receiver.cipher as u8);
+    println!("direction        00");
+    if !receiver.seen_offsets.is_empty() {
+        let seen: Vec<String> = receiver
+            .seen_offsets
+            .iter()
+            .map(|o| o.to_string())
+            .collect();
+        println!("seen_offsets     {}", seen.join(","));
+    }
+    println!("wire             {}", hex(wire));
+    println!("wire_len         {}", wire.len());
+    println!();
+    let mut fields = vec![
+        ("name", json_str(name)),
+        ("kind", json_str("reject_datagram")),
+        ("fault", json_str(fault)),
+        ("device_secret", json_str(&hex(secret.expose_secret()))),
+        (
+            "sender_id",
+            json_str(&format!("{:08x}", sender_id_of(wire))),
+        ),
+        (
+            "receiver_sender",
+            json_str(&format!("{:08x}", receiver.sender_id)),
+        ),
+        ("receiver_epoch", receiver.epoch.to_string()),
+        (
+            "configured_cipher",
+            json_str(&format!("{:02x}", receiver.cipher as u8)),
+        ),
+        ("direction", json_str("00")),
+        ("wire", json_str(&hex(wire))),
+        ("wire_len", wire.len().to_string()),
+    ];
+    if !receiver.seen_offsets.is_empty() {
+        let seen: Vec<String> = receiver
+            .seen_offsets
+            .iter()
+            .map(|o| o.to_string())
+            .collect();
+        fields.push(("seen_offsets", json_str(&seen.join(","))));
+    }
+    json.push(&fields);
+}
+
+/// The `sender_id` of a wire datagram (bytes 5..9, PROTOCOL.md 4.1).
+fn sender_id_of(wire: &[u8]) -> u32 {
+    u32::from_be_bytes([wire[5], wire[6], wire[7], wire[8]])
+}
+
+/// Encode a datagram with a payload the codec would never produce itself —
+/// authentic framing faults (§6.4.4) and malformed control bodies. Replicates
+/// `encode`'s wire image from public pieces only: `auth_header` carries every
+/// header byte except the `epoch_low` nibble (which is zeroed there), so the
+/// header is rebuilt from it plus `d.epoch_low`.
+fn authentic_with_payload(
+    secret: &DeviceSecret,
+    d: &Datagram,
+    epoch: u32,
+    dir: Direction,
+    payload: &[u8],
+) -> Vec<u8> {
+    let cipher = CipherId::from_u8(d.cipher_id).expect("vector cipher implemented");
+    let key = secret.epoch_key(d.sender_id, epoch, dir);
+    let mut signed = Vec::new();
+    signed.extend_from_slice(&d.auth_header(epoch));
+    signed.extend_from_slice(payload);
+    let tag = mac(cipher, &key, &signed, d.datagram_offset).expect("vector must mac");
+    let ah = d.auth_header(epoch);
+    let mut wire = vec![ah[0], ah[1] | d.epoch_low, ah[2], ah[3], ah[4]];
+    wire.extend_from_slice(&ah[9..13]);
+    wire.extend_from_slice(payload);
+    wire.extend_from_slice(&tag);
+    wire
+}
+
+/// Flip one wire byte; the wire is otherwise a valid datagram.
+fn with_byte(mut wire: Vec<u8>, idx: usize, val: u8) -> Vec<u8> {
+    wire[idx] = val;
+    wire
+}
+
+/// A `SERIES` payload grammar vector (PROTOCOL.md 6.9), same shape as
+/// `number_payload`: the IUT validates the payload in isolation against the
+/// anchor offset, no datagram, no MAC.
+fn series_payload(json: &mut JsonVectors, payload: &[u8], anchor: u32, outcome: &str) {
+    println!(
+        "{} {}",
+        if outcome == "accept" {
+            "accept_series"
+        } else {
+            "reject_series"
+        },
+        hex(payload)
+    );
+    println!("anchor_offset {anchor}");
+    println!();
+    json.push(&[
+        ("kind", json_str("series_payload")),
+        ("payload", json_str(&hex(payload))),
+        ("anchor_offset", anchor.to_string()),
+        ("outcome", json_str(outcome)),
+    ]);
+}
+
+/// A `TIME_ANNOUNCE` the reference node MUST reject (PROTOCOL.md 11.5 rules 1
+/// and 3): `clock_state` `"valid"` rejects everything; `"cold"` with
+/// `asserted_time` at or below `last_epoch * 128` rejects as time rollback.
+/// PASS means the IUT rejects after verifying the MAC.
+fn reject_time_announce(
+    json: &mut JsonVectors,
+    name: &str,
+    secret: &DeviceSecret,
+    sender_id: u32,
+    asserted_time: i64,
+    clock_state: &str,
+    last_epoch: u32,
+) {
+    let wire = Datagram::time_announce(sender_id, asserted_time, secret).expect("must encode");
+    println!("# {name}");
+    println!("kind             reject_time_announce");
+    println!("device_secret    {}", hex(secret.expose_secret()));
+    println!("sender_id        {sender_id:08x}");
+    println!("direction        01");
+    println!("asserted_time    {asserted_time}");
+    println!("clock_state      {clock_state}");
+    println!("last_epoch       {last_epoch}");
+    println!("wire             {}", hex(&wire));
+    println!("wire_len         {}", wire.len());
+    println!();
+    json.push(&[
+        ("name", json_str(name)),
+        ("kind", json_str("reject_time_announce")),
+        ("device_secret", json_str(&hex(secret.expose_secret()))),
+        ("sender_id", json_str(&format!("{sender_id:08x}"))),
+        ("direction", json_str("01")),
+        ("asserted_time", asserted_time.to_string()),
+        ("clock_state", json_str(clock_state)),
+        ("last_epoch", last_epoch.to_string()),
         ("wire", json_str(&hex(&wire))),
         ("wire_len", wire.len().to_string()),
     ]);
@@ -396,19 +610,24 @@ fn main() {
         )
         .unwrap(),
     );
-    accept(
-        &mut json,
-        "boundary: reserved bits all set, must be ignored by receivers",
-        &s,
-        epoch,
-        n2c,
-        &{
-            let mut d =
-                Datagram::number(CipherId::HmacSha256T32, id, epoch, 8, SCALE_MIN, 10).unwrap();
-            d.reserved = 0x1F;
-            d
-        },
-    );
+    // §14.1: one accepted datagram per non-zero reserved-bit value, identical
+    // to a baseline apart from the bits — all must decode to the same output
+    // (PROTOCOL.md 4.2 must-ignore).
+    for v in 1u8..=0x1F {
+        accept(
+            &mut json,
+            &format!("boundary: reserved bits {v:02x}, must be ignored by receivers"),
+            &s,
+            epoch,
+            n2c,
+            &{
+                let mut d =
+                    Datagram::number(CipherId::HmacSha256T32, id, epoch, 8, SCALE_MIN, 10).unwrap();
+                d.reserved = v;
+                d
+            },
+        );
+    }
 
     // --- cipher 0x03: two datagrams differing only in datagram_offset,
     // confirming distinct nonces produce distinct tags under one epoch_key
@@ -428,6 +647,327 @@ fn main() {
         epoch,
         n2c,
         &Datagram::number(CipherId::ChaCha20Poly1305, id, epoch, 11, SCALE_MIN, 10).unwrap(),
+    );
+
+    // --- §14.1: one rejected datagram per rejection path in §7.4, each
+    // isolating a single fault. Receiver state a vector needs is spelled out
+    // on the vector; PASS means the IUT's §7.4 pipeline rejects. ---
+    let base = Datagram::number(CipherId::HmacSha256T64, id, epoch, 4096, 0x02, 2350).unwrap();
+    let base_wire = base.encode(&s, epoch, n2c, 65535).unwrap();
+    let rx = Receiver::for_wire(&base, epoch);
+
+    reject_datagram(
+        &mut json,
+        "reject: datagram shorter than header + tag",
+        &s,
+        &base_wire[..base_wire.len() - 1],
+        "short_length",
+        &rx,
+    );
+    reject_datagram(
+        &mut json,
+        "reject: unsupported version 2",
+        &s,
+        &with_byte(base_wire.clone(), 0, (base_wire[0] & 0x1F) | (2 << 5)),
+        "unsupported_version",
+        &rx,
+    );
+    reject_datagram(
+        &mut json,
+        "reject: msg_type 0x00 is reserved",
+        &s,
+        &with_byte(base_wire.clone(), 0, base_wire[0] & 0xE0),
+        "msg_type_0x00",
+        &rx,
+    );
+    reject_datagram(
+        &mut json,
+        "reject: unimplemented msg_type 0x06",
+        &s,
+        &with_byte(base_wire.clone(), 0, (base_wire[0] & 0xE0) | 0x06),
+        "unimplemented_msg_type",
+        &rx,
+    );
+    // Unknown sender: a fully valid datagram from a sender the receiver does
+    // not know, rebuilt under the stranger's own key so step 4 is the only
+    // fault.
+    let stranger = 0xdead_beefu32;
+    let stranger_dg =
+        Datagram::number(CipherId::HmacSha256T64, stranger, epoch, 4096, 0x02, 2350).unwrap();
+    reject_datagram(
+        &mut json,
+        "reject: sender not provisioned with the receiver",
+        &s,
+        &stranger_dg.encode(&s, epoch, n2c, 65535).unwrap(),
+        "unknown_sender",
+        &Receiver {
+            sender_id: id,
+            ..Receiver::for_wire(&stranger_dg, epoch)
+        },
+    );
+    // Cipher mismatch: the wire says 0x01, the receiver is provisioned 0x02.
+    reject_datagram(
+        &mut json,
+        "reject: cipher_id differs from the configured suite",
+        &s,
+        &with_byte(base_wire.clone(), 1, (base_wire[1] & 0x0F) | (0x02 << 4)),
+        "cipher_mismatch",
+        &Receiver {
+            cipher: CipherId::SipHash24,
+            ..rx.clone()
+        },
+    );
+    // Out-of-window epoch: low nibble 5; the receiver at 13281250 accepts only
+    // low nibbles {1, 2} (its own and the one before).
+    reject_datagram(
+        &mut json,
+        "reject: epoch_low outside the acceptance window",
+        &s,
+        &with_byte(base_wire.clone(), 1, (base_wire[1] & 0xF0) | 0x05),
+        "epoch_out_of_window",
+        &rx,
+    );
+    let mut corrupted = base_wire.clone();
+    let last = corrupted.len() - 1;
+    corrupted[last] ^= 0xFF;
+    reject_datagram(
+        &mut json,
+        "reject: tag does not verify",
+        &s,
+        &corrupted,
+        "corrupted_tag",
+        &rx,
+    );
+    // Replay: the arriving offset is already in the window.
+    reject_datagram(
+        &mut json,
+        "reject: replayed datagram_offset",
+        &s,
+        &base_wire,
+        "replayed_offset",
+        &Receiver {
+            seen_offsets: vec![4096],
+            ..Receiver::for_wire(&base, epoch)
+        },
+    );
+    // At or below the window: the window's high-water mark is far ahead of the
+    // arriving offset.
+    let old = Datagram::number(CipherId::HmacSha256T64, id, epoch, 50, 0x02, 2350).unwrap();
+    reject_datagram(
+        &mut json,
+        "reject: offset at or below the window",
+        &s,
+        &old.encode(&s, epoch, n2c, 65535).unwrap(),
+        "offset_below_window",
+        &Receiver {
+            seen_offsets: vec![100_000],
+            ..Receiver::for_wire(&old, epoch)
+        },
+    );
+
+    // --- §6.4.4 framing faults: authentic (MAC-valid), so each reaches step 9
+    // and the rejection is about the body, not the tag. The seventh §14.1
+    // fault -- `size` disagreeing with a fixed-width (format, schema_version)
+    // pair -- is not emitted: fixed-width layouts are a per-deployment
+    // provision and the codec has no width model to hold the check (see
+    // issue #90's notes). ---
+    let msg_base = Datagram::data(
+        MsgType::Message,
+        CipherId::HmacSha256T64,
+        id,
+        epoch,
+        4096,
+        vec![Record::new(Format::None, 1, vec![0x5a])],
+    )
+    .unwrap();
+    // Record header word = (format << 20) | (schema_version << 12) | size,
+    // transmitted as its low three bytes (PROTOCOL.md 6.4.2).
+    let (r1, r2) = ([0x10u8, 0x10, 0x01], [0x10u8, 0x20, 0x01]);
+    let body = |parts: &[&[u8]]| parts.concat();
+    reject_datagram(
+        &mut json,
+        "reject: payload shorter than one record header",
+        &s,
+        &authentic_with_payload(&s, &msg_base, epoch, n2c, &[0x01]),
+        "framing_short_body",
+        &rx,
+    );
+    reject_datagram(
+        &mut json,
+        "reject: trailing fragment of fewer than 3 bytes",
+        &s,
+        &authentic_with_payload(
+            &s,
+            &msg_base,
+            epoch,
+            n2c,
+            &body(&[&r1, &[0x5a], &[0xaa, 0xbb]]),
+        ),
+        "framing_trailing_fragment",
+        &rx,
+    );
+    reject_datagram(
+        &mut json,
+        "reject: record size overruns the payload",
+        &s,
+        &authentic_with_payload(
+            &s,
+            &msg_base,
+            epoch,
+            n2c,
+            &body(&[&[0x10, 0x1f, 0xff], &[0x5a]]),
+        ),
+        "framing_size_overrun",
+        &rx,
+    );
+    reject_datagram(
+        &mut json,
+        "reject: record size 0",
+        &s,
+        &authentic_with_payload(
+            &s,
+            &msg_base,
+            epoch,
+            n2c,
+            &body(&[&[0x10, 0x10, 0x00], &[0x5a]]),
+        ),
+        "framing_size_zero",
+        &rx,
+    );
+    reject_datagram(
+        &mut json,
+        "reject: parse ends past the payload boundary",
+        &s,
+        &authentic_with_payload(
+            &s,
+            &msg_base,
+            epoch,
+            n2c,
+            &body(&[&r1, &[0x5a], &[0x10, 0x1f, 0xff]]),
+        ),
+        "framing_past_boundary",
+        &rx,
+    );
+    let event_base = Datagram::data(
+        MsgType::Event,
+        CipherId::HmacSha256T64,
+        id,
+        epoch,
+        4096,
+        vec![Record::new(Format::None, 7, vec![0xaa])],
+    )
+    .unwrap();
+    reject_datagram(
+        &mut json,
+        "reject: EVENT carries two records",
+        &s,
+        &authentic_with_payload(
+            &s,
+            &event_base,
+            epoch,
+            n2c,
+            &body(&[&r1, &[0x5a], &r2, &[0x22]]),
+        ),
+        "framing_event_two_records",
+        &rx,
+    );
+
+    // --- §14.1 boundary set: the size ceiling, and the epoch-boundary pair ---
+    accept(
+        &mut json,
+        "boundary: size 4095, the largest a record size field can name",
+        &s,
+        epoch,
+        n2c,
+        &Datagram::data(
+            MsgType::Message,
+            CipherId::HmacSha256T32,
+            id,
+            epoch,
+            2,
+            vec![Record::new(Format::CapnProto, 0xff, vec![0x77; 4095])],
+        )
+        .unwrap(),
+    );
+    accept(
+        &mut json,
+        "boundary: first datagram of a new epoch",
+        &s,
+        epoch + 1,
+        n2c,
+        &Datagram::number(CipherId::HmacSha256T32, id, epoch + 1, 4096, SCALE_MIN, 10).unwrap(),
+    );
+    // Encoded under `epoch - 1`, arriving at a receiver that has already moved
+    // to `epoch`: the two-epoch acceptance window admits it (PROTOCOL.md 9.3).
+    accept_cross(
+        &mut json,
+        "boundary: preceding-epoch datagram after an epoch change",
+        &s,
+        epoch - 1,
+        epoch,
+        n2c,
+        &Datagram::number(CipherId::HmacSha256T32, id, epoch - 1, 4096, SCALE_MIN, 10).unwrap(),
+    );
+
+    // --- SERIES payload grammar (PROTOCOL.md 6.9), accept and reject.
+    // Payload = scale, first reading's mantissa (its instant is the anchor,
+    // not on the wire), then 4-byte (delta, mantissa) entries. ---
+    println!("# SERIES payloads, validated in isolation against the anchor");
+    let ser = |scale: u8, first_m: i16, entries: &[(u16, i16)]| {
+        let mut p = vec![scale];
+        p.extend_from_slice(&first_m.to_be_bytes());
+        for &(delta, mantissa) in entries {
+            p.extend_from_slice(&delta.to_be_bytes());
+            p.extend_from_slice(&mantissa.to_be_bytes());
+        }
+        p
+    };
+    // §14.1 SERIES acceptance: the minimum (two readings), the delta range's
+    // ends, and a payload filling the 499-byte budget (Section 6.6: 3 + 4n,
+    // n = 124).
+    series_payload(&mut json, &ser(0x01, 0, &[(1, 1)]), 5, "accept");
+    series_payload(&mut json, &ser(0x01, 0, &[(65_535, 1)]), 5, "accept");
+    let mut budget = ser(0x01, 0, &[]);
+    for i in 0..124i16 {
+        budget.extend_from_slice(&1u16.to_be_bytes());
+        budget.extend_from_slice(&i.to_be_bytes());
+    }
+    series_payload(&mut json, &budget, 5, "accept");
+    // §14.1 SERIES rejections.
+    series_payload(&mut json, &ser(0x02, 10, &[]), 4096, "reject"); // 3 bytes: one reading
+    // Misaligned trailers: 3 + 4n + 1 and 3 + 4n + 2 bytes.
+    let mut misaligned1 = ser(0x02, 10, &[(1, 20)]);
+    misaligned1.push(0x00);
+    series_payload(&mut json, &misaligned1, 4096, "reject");
+    let mut misaligned2 = ser(0x02, 10, &[(1, 20)]);
+    misaligned2.extend_from_slice(&[0x00, 0x00]);
+    series_payload(&mut json, &misaligned2, 4096, "reject");
+    // A delta of 0.
+    series_payload(&mut json, &ser(0x02, 10, &[(0, 20)]), 4096, "reject");
+    // Cumulative offset reaching TICKS_PER_EPOCH: anchor 524280, delta 8.
+    series_payload(&mut json, &ser(0x01, 0, &[(8, 1)]), 524_280, "reject");
+    println!();
+
+    // --- §14.1 cold start: TIME_ANNOUNCE the node MUST reject (11.5) ---
+    // The floor: last_epoch * 128 == 1_700_000_000 exactly, and the rule is
+    // "strictly beyond", so the floor itself rejects.
+    reject_time_announce(
+        &mut json,
+        "cold start: announcement at the floor is rejected as time rollback",
+        &s,
+        id,
+        1_700_000_000,
+        "cold",
+        epoch,
+    );
+    reject_time_announce(
+        &mut json,
+        "cold start: a node whose clock is already valid rejects every announcement",
+        &s,
+        id,
+        1_800_000_000,
+        "valid",
+        epoch,
     );
 
     // --- time recovery: its own key schedule, one key per direction ---

@@ -58,18 +58,22 @@ unrecognized *extra* field (forward compatibility: this contract may grow new
 informational fields without becoming a breaking change).
 
 - **`accept`** — fields: `device_secret` (32-byte hex), `sender_id` (hex,
-  §4.4.1), `epoch_id` (integer), `direction` (`"00"` = node-to-collector,
-  `"01"` = collector-to-node, §9.2.4), `cipher_id` (hex, §8.1), `msg_type`
-  (hex), `offset` (integer, `datagram_offset`), `wire` (hex, the full UDP
-  payload), `wire_len` (integer, byte length of `wire`).
+  §4.4.1), `epoch_id` (integer, the receiver's current epoch), optionally
+  `encode_epoch` (integer, present only on cross-epoch vectors: the epoch the
+  datagram was encoded under, §9.3's two-epoch acceptance window), 
+  `direction` (`"00"` = node-to-collector, `"01"` = collector-to-node,
+  §9.2.4), `cipher_id` (hex, §8.1), `msg_type` (hex), `offset` (integer,
+  `datagram_offset`), `wire` (hex, the full UDP payload), `wire_len`
+  (integer, byte length of `wire`).
 
   The IUT must decode `wire` as a datagram from `sender_id` under
   `device_secret`/`cipher_id`, treating `epoch_id` as the receiver's current
   epoch (so there is no clock skew to reason about) and `direction` as given,
   and the decode must succeed — every check PROTOCOL.md §7.4 requires must
   pass, including the MAC. The IUT must then **re-encode** the datagram it
-  just decoded, from the same `sender_id`/`device_secret`/`epoch_id`/`direction`,
-  and the result must equal `wire` **byte for byte**. `PASS` requires both:
+  just decoded, from the same `sender_id`/`device_secret`/`direction` and the
+  epoch the datagram reconstructed to (`encode_epoch` where present,
+  `epoch_id` otherwise), and the result must equal `wire` **byte for byte**. `PASS` requires both:
   decode succeeds, and re-encoding reproduces `wire` exactly. This is the
   property that actually catches wire-format drift — a codec that decodes
   loosely but encodes differently is not conformant, and a vector-only decode
@@ -98,6 +102,36 @@ informational fields without becoming a breaking change).
   `"accept"` vector, the IUT is not additionally required to report the
   decoded `(scale, mantissa)` anywhere the driver can see, since the driver
   only reads `PASS`/`FAIL`.
+
+- **`series_payload`** — fields: `payload` (hex, the raw `SERIES` payload,
+  §6.9), `anchor_offset` (integer, the datagram offset the first reading
+  hangs from), `outcome` (`"accept"` or `"reject"`). Same shape as
+  `number_payload`: the IUT validates `payload` against the `SERIES` grammar
+  of §6.9 in isolation, anchored at `anchor_offset`, and `PASS` means its
+  accept/reject decision matches `outcome`.
+
+- **`reject_datagram`** — fields: `device_secret` (32-byte hex), `sender_id`
+  (hex, the sender on the wire), `receiver_sender` (hex, the sender the
+  receiver is provisioned for), `receiver_epoch` (integer, the receiver's
+  current epoch), `configured_cipher` (hex, the suite the receiver is
+  provisioned with), `direction` (`"00"`/`"01"`), `wire`, `wire_len`, and
+  optionally `seen_offsets` (comma-separated integers — offsets the receiver
+  must treat as already accepted when seeding its replay window) and
+  `fault` (a short human-readable name, informational). The `wire` may be
+  authentic or corrupted; `PASS` means the IUT's §7.4 pipeline **rejects**
+  the datagram given exactly this receiver state. These discharge §14.1's
+  "one rejected datagram per rejection path in Section 7.4" requirement and
+  the §6.4.4 framing faults (authentic bodies that frame badly).
+
+- **`reject_time_announce`** — fields: `device_secret`, `sender_id`,
+  `direction` (always `"01"`), `asserted_time` (integer, signed),
+  `clock_state` (`"cold"` or `"valid"`), `last_epoch` (integer), `wire`,
+  `wire_len` (§11.5). The `wire` is a MAC-genuine announcement — the IUT
+  must first verify it succeeds as a `TIME_ANNOUNCE` — and then must reject
+  it in the node's clock state machine: `"valid"` rejects every announce
+  (rule 1); `"cold"` with `asserted_time` at or below `last_epoch * 128`
+  rejects as time rollback (rule 3). `PASS` means the announce verified but
+  was rejected.
 
 `epoch_key`, `time_key`, and `auth_header`, where present on a vector, are
 intermediate values this project's own test suite (`tests/vectors.rs`) checks
