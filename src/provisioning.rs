@@ -243,14 +243,42 @@ impl Bundle {
 }
 
 fn parse_hex_bytes(s: &str) -> Result<Vec<u8>, ()> {
-    if !s.len().is_multiple_of(2) {
+    // Bytes, not `&str` slicing: a bundle file is external input, and slicing a
+    // &str at byte offsets panics when a multi-byte character straddles an even
+    // boundary (issue #88). Non-ASCII bytes simply fail the hex table.
+    let bytes = s.as_bytes();
+    if !bytes.len().is_multiple_of(2) {
         return Err(());
     }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|_| ()))
+    bytes
+        .chunks_exact(2)
+        .map(|pair| {
+            let hi = HEX_VALUE[pair[0] as usize];
+            let lo = HEX_VALUE[pair[1] as usize];
+            match (hi, lo) {
+                (Some(hi), Some(lo)) => Ok(hi << 4 | lo),
+                _ => Err(()),
+            }
+        })
         .collect()
 }
+
+/// Hex digit values, `None` for everything that is not a hex digit.
+const HEX_VALUE: [Option<u8>; 256] = {
+    let mut table = [None; 256];
+    let mut i = 0;
+    while i < 256 {
+        let c = i as u8;
+        table[i] = match c {
+            b'0'..=b'9' => Some(c - b'0'),
+            b'a'..=b'f' => Some(c - b'a' + 10),
+            b'A'..=b'F' => Some(c - b'A' + 10),
+            _ => None,
+        };
+        i += 1;
+    }
+    table
+};
 
 /// Load every `*.bundle` file in `dir`, in directory-listing order.
 ///
@@ -279,6 +307,29 @@ mod tests {
             cipher_id: 0x04,
             layouts: vec![(0x01, 0x01), (0x02, 0x03)],
         }
+    }
+
+    // Regression (issue #88): a hex field containing a multi-byte character used
+    // to panic ("not a char boundary") instead of returning a format error.
+    #[test]
+    fn non_ascii_in_secret_is_a_format_error_not_a_panic() {
+        let mut hex = "ab".repeat(10);
+        hex.push('a'); // char starts at byte 21; its continuation bytes straddle even indices
+        hex.push('中');
+        hex.push_str(&"cd".repeat(20));
+        let s = format!("sender_id 00000001\ndevice_secret {hex}\ncipher_id 01\n");
+        assert!(Bundle::parse(&s).is_err());
+    }
+
+    // The byte-table rewrite must still accept the shapes the old code did.
+    #[test]
+    fn hex_parser_still_accepts_mixed_case_and_uppercase() {
+        let mut hex = "aB".repeat(16);
+        hex.push_str(&"Cd".repeat(16));
+        let s = format!("sender_id 00000001\ndevice_secret {hex}\ncipher_id 01\n");
+        let b = Bundle::parse(&s).expect("mixed-case hex must parse");
+        assert_eq!(b.device_secret[0], 0xab);
+        assert_eq!(b.device_secret[16], 0xcd);
     }
 
     #[test]
