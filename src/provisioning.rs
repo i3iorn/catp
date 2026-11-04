@@ -250,11 +250,14 @@ fn parse_hex_bytes(s: &str) -> Result<Vec<u8>, ()> {
     if !bytes.len().is_multiple_of(2) {
         return Err(());
     }
-    bytes
-        .chunks_exact(2)
-        .map(|pair| {
-            let hi = HEX_VALUE[pair[0] as usize];
-            let lo = HEX_VALUE[pair[1] as usize];
+    // Indexed rather than `chunks_exact(2)`: newer clippy flags constant-size
+    // `chunks_exact` (`as_chunks` needs 1.88+, and this stays below any lint
+    // version skew between CI images).
+    (0..bytes.len())
+        .step_by(2)
+        .map(|i| {
+            let hi = HEX_VALUE[bytes[i] as usize];
+            let lo = HEX_VALUE[bytes[i + 1] as usize];
             match (hi, lo) {
                 (Some(hi), Some(lo)) => Ok(hi << 4 | lo),
                 _ => Err(()),
