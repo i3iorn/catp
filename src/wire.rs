@@ -36,13 +36,33 @@ impl Record {
             | (self.body.len() as u32 & 0xFFF)
     }
 
-    fn encode_into(&self, out: &mut Vec<u8>) -> Result<(), Error> {
+    /// Serialize into the caller's buffer, returning the bytes written
+    /// (issue #83: the allocation-free write path behind `encode_into`).
+    /// Refuses rather than truncates: `BufferTooSmall` carries what was
+    /// available and what was needed.
+    fn write_into(&self, out: &mut [u8]) -> Result<usize, Error> {
         if self.body.is_empty() || self.body.len() > MAX_BODY {
             return Err(Error::BodyTooLarge(self.body.len()));
         }
-        out.extend_from_slice(&self.header_word().to_be_bytes()[1..4]);
-        out.extend_from_slice(&self.body);
-        Ok(())
+        let need = self.wire_len();
+        if out.len() < need {
+            return Err(Error::BufferTooSmall {
+                have: out.len(),
+                need,
+            });
+        }
+        out[..RECORD_HEADER_LEN].copy_from_slice(&self.header_word().to_be_bytes()[1..4]);
+        out[RECORD_HEADER_LEN..need].copy_from_slice(&self.body);
+        Ok(need)
+    }
+
+    /// `write_into` behind a `Vec`: test helpers build whole buffers into a
+    /// `Vec`; the buffer path above is the production one.
+    #[cfg(test)]
+    fn encode_into(&self, out: &mut Vec<u8>) -> Result<(), Error> {
+        let start = out.len();
+        out.resize(start + self.wire_len(), 0);
+        self.write_into(&mut out[start..]).map(|_| ())
     }
 
     fn decode(buf: &[u8]) -> Result<(Record, usize), Error> {
@@ -273,16 +293,88 @@ impl Datagram {
         ]
     }
 
-    fn payload(&self) -> Result<Vec<u8>, Error> {
+    /// Wire length of the payload this datagram serializes to: the records'
+    /// combined framing, or the raw body for `NUMBER`/`SERIES`/control types.
+    fn payload_len(&self) -> usize {
         if !self.records.is_empty() {
-            let mut p = Vec::new();
-            for r in &self.records {
-                r.encode_into(&mut p)?;
-            }
-            Ok(p)
+            self.records.iter().map(|r| r.wire_len()).sum()
         } else {
-            Ok(self.raw.clone())
+            self.raw.len()
         }
+    }
+
+    /// Serialize the payload into the caller's buffer, returning the bytes
+    /// written (issue #83: the allocation-free path behind `payload`). On
+    /// error the buffer's contents are unspecified.
+    fn payload_into(&self, out: &mut [u8]) -> Result<usize, Error> {
+        let need = self.payload_len();
+        if out.len() < need {
+            return Err(Error::BufferTooSmall {
+                have: out.len(),
+                need,
+            });
+        }
+        if !self.records.is_empty() {
+            let mut used = 0usize;
+            for r in &self.records {
+                used += r.write_into(&mut out[used..])?;
+            }
+        } else {
+            out[..need].copy_from_slice(&self.raw);
+        }
+        Ok(need)
+    }
+
+    /// Serialize and authenticate into the caller's buffer, returning the
+    /// bytes written (issue #83: the allocation-free path behind [`Self::encode`]).
+    ///
+    /// Needs `HEADER_LEN + payload_len + cipher.tag_len()` bytes; anything
+    /// larger is untouched past the written prefix, and a short buffer is
+    /// refused with [`Error::BufferTooSmall`] carrying both counts rather
+    /// than grown into. There is no `max_datagram_size` here — the caller's
+    /// buffer *is* the size bound; [`Self::encode`] keeps the deployment's
+    /// configured ceiling on the allocating path. On error the buffer's
+    /// contents are unspecified.
+    ///
+    /// Under `cipher_id` `0x03` the total authenticated message is staged
+    /// into one fixed 512-byte scratch ([`MAX_DATAGRAM_IPV4`], exactly the
+    /// IPv4 profile's 13-byte header image plus its 499-byte payload
+    /// budget), so that suite is bound to the IPv4 profile; the other three
+    /// suites fold their input streamingly and take any size.
+    pub fn encode_into(
+        &self,
+        secret: &DeviceSecret,
+        epoch_id: u32,
+        dir: Direction,
+        out: &mut [u8],
+    ) -> Result<usize, Error> {
+        let cipher =
+            CipherId::from_u8(self.cipher_id).ok_or(Error::CipherUnimplemented(self.cipher_id))?;
+        let tag_len = cipher.tag_len();
+        let need = HEADER_LEN + self.payload_len() + tag_len;
+        if out.len() < need {
+            return Err(Error::BufferTooSmall {
+                have: out.len(),
+                need,
+            });
+        }
+        let plen = self.payload_into(&mut out[HEADER_LEN..HEADER_LEN + self.payload_len()])?;
+        let key = secret.epoch_key(self.sender_id, epoch_id, dir);
+        out[..HEADER_LEN].copy_from_slice(&self.header_bytes());
+        // The payload just written lives in `out`; authenticating header image
+        // plus payload in place is what `mac_parts` exists for (issue #83).
+        // split_at_mut keeps the borrow checker happy about the two
+        // non-overlapping regions.
+        let (payload, tag) = out[HEADER_LEN..].split_at_mut(plen);
+        let tag = &mut tag[..tag_len];
+        mac_parts(
+            cipher,
+            &key,
+            &[&self.auth_header(epoch_id), payload],
+            self.datagram_offset,
+            tag,
+        )?;
+        Ok(HEADER_LEN + plen + tag_len)
     }
 
     /// Serialize and authenticate, producing the UDP payload.
@@ -293,21 +385,16 @@ impl Datagram {
         dir: Direction,
         max_datagram_size: usize,
     ) -> Result<Vec<u8>, Error> {
-        let cipher =
-            CipherId::from_u8(self.cipher_id).ok_or(Error::CipherUnimplemented(self.cipher_id))?;
-        let payload = self.payload()?;
-        let key = secret.epoch_key(self.sender_id, epoch_id, dir);
-
-        let mut signed = Vec::with_capacity(13 + payload.len());
-        signed.extend_from_slice(&self.auth_header(epoch_id));
-        signed.extend_from_slice(&payload);
-        let tag = mac(cipher, &key, &signed, self.datagram_offset)?;
-
-        let mut out = Vec::with_capacity(HEADER_LEN + payload.len() + tag.len());
-        out.extend_from_slice(&self.header_bytes());
-        out.extend_from_slice(&payload);
-        out.extend_from_slice(&tag);
-
+        let mut out = vec![
+            0u8;
+            HEADER_LEN
+                + self.payload_len()
+                + CipherId::from_u8(self.cipher_id)
+                    .ok_or(Error::CipherUnimplemented(self.cipher_id))?
+                    .tag_len()
+        ];
+        let n = self.encode_into(secret, epoch_id, dir, &mut out)?;
+        out.truncate(n);
         if out.len() > max_datagram_size {
             return Err(Error::Oversize(out.len()));
         }
@@ -539,12 +626,12 @@ pub fn decode_time_announce(
 /// Verify a datagram against a peer, in the order of PROTOCOL.md 7.4.
 ///
 /// `window` is mutated only after the MAC verifies (step 7).
-pub fn decode(
+pub fn decode<const WORDS: usize>(
     buf: &[u8],
     peer: &PeerConfig,
     local_epoch: u32,
     dir: Direction,
-    window: &mut ReplayWindow,
+    window: &mut ReplayWindow<WORDS>,
 ) -> Result<Accepted, Error> {
     // --- step 1: length
     if buf.len() < HEADER_LEN {
@@ -681,6 +768,107 @@ mod tests {
         Record::new(Format::None, 1, body.to_vec())
     }
     const EPOCH: u32 = 13_281_250;
+
+    // Issue #83: the slice-out encode path must reproduce the allocating
+    // path byte for byte, refuse a short buffer with exact counts, and bind
+    // cipher 0x03 to the IPv4 staging budget.
+    #[test]
+    fn encode_into_matches_encode_for_every_cipher() {
+        let secret = DeviceSecret::new([9u8; 32]);
+        for cipher in [
+            CipherId::HmacSha256T64,
+            CipherId::HmacSha256T32,
+            CipherId::SipHash24,
+            CipherId::ChaCha20Poly1305,
+        ] {
+            let d = Datagram::number(cipher, 1, 100, 4096, 0x02, -25).unwrap();
+            let vecd = d
+                .encode(&secret, 100, Direction::NodeToCollector, 65535)
+                .unwrap();
+            let mut buf = [0u8; 65535];
+            let n = d
+                .encode_into(&secret, 100, Direction::NodeToCollector, &mut buf)
+                .unwrap();
+            assert_eq!(n, vecd.len(), "{cipher:?}");
+            assert_eq!(&buf[..n], &vecd[..], "{cipher:?}");
+        }
+    }
+
+    #[test]
+    fn encode_into_refuses_a_short_buffer_with_exact_counts() {
+        let secret = DeviceSecret::new([9u8; 32]);
+        let d = Datagram::number(CipherId::HmacSha256T64, 1, 100, 4096, 0x02, -25).unwrap();
+        let need = HEADER_LEN + 3 + CipherId::HmacSha256T64.tag_len();
+        let mut short = [0u8; 64]; // need - 1 for a NUMBER with tag 8: 9 + 3 + 8 = 20
+        assert_eq!(need, 20);
+        let err = d
+            .encode_into(
+                &secret,
+                100,
+                Direction::NodeToCollector,
+                &mut short[..need - 1],
+            )
+            .unwrap_err();
+        assert_eq!(
+            err,
+            Error::BufferTooSmall {
+                have: need - 1,
+                need
+            }
+        );
+        // Exact fit succeeds and writes exactly `need` bytes.
+        let mut exact = [0u8; 128];
+        let n = d
+            .encode_into(&secret, 100, Direction::NodeToCollector, &mut exact)
+            .unwrap();
+        assert_eq!(n, need);
+    }
+
+    #[test]
+    fn encode_into_carries_records_into_the_caller_buffer() {
+        let secret = DeviceSecret::new([9u8; 32]);
+        let d = Datagram::data(
+            MsgType::Message,
+            CipherId::HmacSha256T32,
+            1,
+            100,
+            7,
+            vec![
+                Record::new(Format::None, 1, vec![0x01]),
+                Record::new(Format::Cbor, 2, vec![0x02, 0x03]),
+            ],
+        )
+        .unwrap();
+        let vecd = d
+            .encode(&secret, 100, Direction::NodeToCollector, 65535)
+            .unwrap();
+        let mut buf = [0u8; 65535];
+        let n = d
+            .encode_into(&secret, 100, Direction::NodeToCollector, &mut buf)
+            .unwrap();
+        assert_eq!(n, vecd.len());
+        assert_eq!(&buf[..n], &vecd[..]);
+    }
+
+    #[test]
+    fn chacha_encode_is_bound_to_the_ipv4_staging_budget() {
+        let secret = DeviceSecret::new([9u8; 32]);
+        let d = Datagram::data(
+            MsgType::Message,
+            CipherId::ChaCha20Poly1305,
+            1,
+            100,
+            7,
+            vec![Record::new(Format::None, 1, vec![0x77; 600])],
+        )
+        .unwrap();
+        // 13 + 603 > MAX_DATAGRAM_IPV4: the single-slice AAD staging refuses
+        // rather than growing a scratch buffer.
+        let err = d
+            .encode_into(&secret, 100, Direction::NodeToCollector, &mut [0u8; 65535])
+            .unwrap_err();
+        assert!(matches!(err, Error::Oversize(_)), "{err:?}");
+    }
 
     #[test]
     fn record_header_packs_at_field_maxima() {

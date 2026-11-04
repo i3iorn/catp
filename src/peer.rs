@@ -14,10 +14,13 @@ use crate::*;
 #[cfg(feature = "std")]
 use std::collections::HashMap;
 
-/// A window for one epoch, plus the epoch it belongs to.
-struct EpochWindow {
+/// A window for one epoch, plus the epoch it belongs to. `WORDS` is
+/// [`ReplayWindow`]'s compile-time bitmap size, propagated from
+/// [`PeerState`] so a node chooses its window's footprint once, at the type
+/// level (issue #83).
+struct EpochWindow<const WORDS: usize> {
     epoch: u32,
-    window: ReplayWindow,
+    window: ReplayWindow<WORDS>,
 }
 
 /// Discard counters, categorized by the PROTOCOL.md 7.4 step that would have
@@ -123,7 +126,11 @@ impl Stats {
 }
 
 /// Per-sender receiver state.
-pub struct PeerState {
+///
+/// Generic over `WORDS`, [`ReplayWindow`]'s compile-time bitmap size, with
+/// the same one-second default. The window's heap footprint is zero at any
+/// size (issue #83): `WORDS` only sets stack size.
+pub struct PeerState<const WORDS: usize = DEFAULT_WINDOW_WORDS> {
     pub config: PeerConfig,
     /// One window per accepted epoch. At most two are ever live, because
     /// Section 9.3 accepts only `{local-1, local}` -- a fixed 2-slot array
@@ -131,8 +138,7 @@ pub struct PeerState {
     /// never an arbitrary one. This also keeps `PeerState` free of any
     /// hash-table dependency, unlike `Collector`'s genuinely unbounded
     /// `sender_id` registry.
-    windows: [Option<EpochWindow>; 2],
-    window_entries: u32,
+    windows: [Option<EpochWindow<WORDS>>; 2],
     highest_epoch_announced: Option<u32>,
     /// `None` unless `config.inbound_rate_limit` was set; see
     /// [`CipherId::requires_inbound_rate_limit`] for when it must be.
@@ -140,8 +146,15 @@ pub struct PeerState {
     stats: Stats,
 }
 
-impl PeerState {
-    /// Builds the state for one provisioned peer.
+// `new` lives on the concrete default type rather than the generic impl, for
+// the same reason as `ReplayWindow::one_second` and `Collector::new`: a
+// `PeerState::new(...)` path would otherwise leave the const-generic
+// parameter to inference and fail at every call site without an annotation
+// (issue #83).
+impl PeerState<DEFAULT_WINDOW_WORDS> {
+    /// Builds the state for one provisioned peer, with the type's `WORDS`
+    /// deciding the replay window's duration (`WORDS` words x 64 ticks;
+    /// the default 64 words is one second of tolerance, PROTOCOL.md 10.2).
     ///
     /// Fails with [`Error::CipherRequiresRateLimit`] if `config.cipher`
     /// requires an inbound limit (PROTOCOL.md 8.1.1) and
@@ -149,12 +162,6 @@ impl PeerState {
     /// NOT select it where that limit cannot be enforced" half of Section
     /// 8.1.1, checked at the one place that can actually enforce it.
     pub fn new(config: PeerConfig) -> Result<Self, Error> {
-        Self::with_window(config, TICKS_PER_SEC as u32)
-    }
-
-    /// `entries` is a duration: offsets are clock ticks, so N entries is
-    /// `N / 4096` seconds of reordering tolerance (PROTOCOL.md 10.2).
-    pub fn with_window(config: PeerConfig, entries: u32) -> Result<Self, Error> {
         if config.cipher.requires_inbound_rate_limit() && config.inbound_rate_limit.is_none() {
             return Err(Error::CipherRequiresRateLimit(config.cipher as u8));
         }
@@ -162,13 +169,14 @@ impl PeerState {
         Ok(Self {
             config,
             windows: [None, None],
-            window_entries: entries,
             highest_epoch_announced: None,
             limiter,
             stats: Stats::default(),
         })
     }
+}
 
+impl<const WORDS: usize> PeerState<WORDS> {
     /// Windows for epochs outside the acceptance window are discarded
     /// (PROTOCOL.md 10.2).
     fn prune(&mut self, local_epoch: u32) {
@@ -196,10 +204,9 @@ impl PeerState {
     /// evicts a slot outright only exists to keep this function total rather
     /// than trust that invariant with a panic; it should never fire.
     fn window_for(
-        windows: &mut [Option<EpochWindow>; 2],
+        windows: &mut [Option<EpochWindow<WORDS>>; 2],
         epoch: u32,
-        entries: u32,
-    ) -> &mut ReplayWindow {
+    ) -> &mut ReplayWindow<WORDS> {
         let idx = if let Some(i) = windows
             .iter()
             .position(|s| matches!(s, Some(ew) if ew.epoch == epoch))
@@ -208,13 +215,13 @@ impl PeerState {
         } else if let Some(i) = windows.iter().position(|s| s.is_none()) {
             windows[i] = Some(EpochWindow {
                 epoch,
-                window: ReplayWindow::new(entries),
+                window: ReplayWindow::new(),
             });
             i
         } else {
             windows[0] = Some(EpochWindow {
                 epoch,
-                window: ReplayWindow::new(entries),
+                window: ReplayWindow::new(),
             });
             0
         };
@@ -256,8 +263,7 @@ impl PeerState {
         // it runs before the MAC (PROTOCOL.md 12.5).
         let epoch = reconstruct_epoch(local_epoch, buf[1] & 0x0F).ok_or(Error::EpochOutOfWindow)?;
         self.prune(local_epoch);
-        let entries = self.window_entries;
-        let window = Self::window_for(&mut self.windows, epoch, entries);
+        let window = Self::window_for(&mut self.windows, epoch);
         let accepted = decode(buf, &self.config, local_epoch, dir, window)?;
         if let Some(limiter) = &mut self.limiter
             && !limiter.try_acquire(now_ms)
@@ -314,6 +320,11 @@ impl PeerState {
 /// it -- it only ever authenticates as itself, via one [`PeerState`].
 #[cfg(feature = "std")]
 pub struct Collector {
+    /// A collector always serves the default one-second replay window
+    /// (`PeerState<DEFAULT_WINDOW_WORDS>`): the window duration is a
+    /// per-node choice, and the host-side registry has no reason to widen
+    /// it. A node that needs a different window builds its own
+    /// `PeerState<WORDS>` directly (issue #83).
     peers: HashMap<u32, PeerState>,
     /// Only ever holds `too_short` and `unknown_sender`: both are decided
     /// before a peer is even looked up, so they can't live on a `PeerState`.
