@@ -28,6 +28,7 @@ use chacha20poly1305::aead::AeadInOut;
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit as AeadKeyInit};
 use hkdf::Hkdf;
 // `KeyInit` supplies `new_from_slice`; it moved off `Mac` in digest 0.11.
+use core::hash::Hasher as _;
 use hmac::digest::KeyInit;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
@@ -284,6 +285,14 @@ pub enum Error {
     /// SHOULD, for the 4-byte tag). Refused at provisioning time rather than
     /// left to be discovered under attack.
     CipherRequiresRateLimit(u8),
+    /// A caller-supplied output buffer was shorter than the tag (or the
+    /// encoded datagram) the operation needed. `have`/`need` are byte counts
+    /// (issue #83: the slice-out encode/MAC paths report this instead of
+    /// growing an internal buffer).
+    BufferTooSmall {
+        have: usize,
+        need: usize,
+    },
 }
 
 /// Is `scale` one of the seven divisors PROTOCOL.md 6.3.1 defines?
@@ -419,11 +428,15 @@ impl DeviceSecret {
     /// last use unzeroized either.
     pub fn epoch_key(&self, sender_id: u32, epoch_id: u32, dir: Direction) -> Zeroizing<[u8; 32]> {
         let hk = Hkdf::<Sha256>::new(None, &self.0);
-        let mut info = Vec::with_capacity(5 + 4 + 4 + 1);
-        info.extend_from_slice(b"CATP1");
-        info.extend_from_slice(&sender_id.to_be_bytes());
-        info.extend_from_slice(&epoch_id.to_be_bytes());
-        info.push(dir as u8);
+        // Built on the stack: `alloc` is linked, but key derivation runs on
+        // every datagram, so keeping the info buffer out of the heap is the
+        // kind of thing a constrained node cannot afford to give back (issue
+        // #83). 5 "CATP1" + 4 sender + 4 epoch + 1 direction = 14 bytes.
+        let mut info = [0u8; 14];
+        info[..5].copy_from_slice(b"CATP1");
+        info[5..9].copy_from_slice(&sender_id.to_be_bytes());
+        info[9..13].copy_from_slice(&epoch_id.to_be_bytes());
+        info[13] = dir as u8;
         let mut okm = [0u8; 32];
         hk.expand(&info, &mut okm)
             .expect("32 is a valid HKDF length");
@@ -437,10 +450,12 @@ impl DeviceSecret {
     /// receiver MUST NOT accept a tag generated with the opposite direction.
     pub fn time_key(&self, sender_id: u32, direction: Direction) -> Zeroizing<[u8; 32]> {
         let hk = Hkdf::<Sha256>::new(None, &self.0);
-        let mut info = Vec::with_capacity(10 + 4 + 1);
-        info.extend_from_slice(b"CATP1-time");
-        info.extend_from_slice(&sender_id.to_be_bytes());
-        info.push(direction as u8);
+        // Same stack-buffer reasoning as `epoch_key`: 10 "CATP1-time" + 4
+        // sender + 1 direction = 15 bytes (issue #83).
+        let mut info = [0u8; 15];
+        info[..10].copy_from_slice(b"CATP1-time");
+        info[10..14].copy_from_slice(&sender_id.to_be_bytes());
+        info[14] = direction as u8;
         let mut okm = [0u8; 32];
         hk.expand(&info, &mut okm)
             .expect("32 is a valid HKDF length");
@@ -459,16 +474,66 @@ pub fn mac(
     msg: &[u8],
     datagram_offset: u32,
 ) -> Result<Vec<u8>, Error> {
+    let mut tag = vec![0u8; cipher.tag_len()];
+    mac_into(cipher, key, msg, datagram_offset, &mut tag)?;
+    Ok(tag)
+}
+
+/// Compute a tag of `tag_len` bytes over `msg` under `key`, writing it into
+/// `out` (issue #83: the caller supplies the buffer, so neither the receive
+/// nor the send path allocates for a tag).
+///
+/// `out` needs `cipher.tag_len()` bytes; the first `tag_len()` bytes are
+/// written, any extra bytes are left untouched.
+pub fn mac_into(
+    cipher: CipherId,
+    key: &[u8; 32],
+    msg: &[u8],
+    datagram_offset: u32,
+    out: &mut [u8],
+) -> Result<(), Error> {
+    mac_parts(cipher, key, &[msg], datagram_offset, out)
+}
+
+/// `mac_into` over a message given as disjoint slices, in order.
+///
+/// Exists because the encode path authenticates a 13-byte header image plus a
+/// payload that lives in the caller's output buffer; hashing the parts one by
+/// one avoids both a copy and a heap allocation for the concatenation. Suites
+/// whose primitive wants one contiguous message (ChaCha20-Poly1305's
+/// single-slice AAD) stage the parts into a fixed [`MAX_DATAGRAM_IPV4`]-sized
+/// scratch buffer and refuse a larger total with `Error::Oversize` rather than
+/// grow one.
+pub fn mac_parts(
+    cipher: CipherId,
+    key: &[u8; 32],
+    parts: &[&[u8]],
+    datagram_offset: u32,
+    out: &mut [u8],
+) -> Result<(), Error> {
     if !cipher.implemented() {
         return Err(Error::CipherUnimplemented(cipher as u8));
     }
+    let tag_len = cipher.tag_len();
+    if out.len() < tag_len {
+        return Err(Error::BufferTooSmall {
+            have: out.len(),
+            need: tag_len,
+        });
+    }
+    // Scratch for suites whose primitive wants one contiguous message
+    // (ChaCha20-Poly1305's single-slice AAD). Declared unconditionally but
+    // touched only by that arm; on every other suite the optimizer drops it.
+    let mut stage = [0u8; MAX_DATAGRAM_IPV4];
     match cipher {
         CipherId::HmacSha256T64 | CipherId::HmacSha256T32 => {
             let mut m = <Hmac<Sha256> as KeyInit>::new_from_slice(key)
                 .expect("HMAC accepts any key length");
-            m.update(msg);
+            for part in parts {
+                m.update(part);
+            }
             let full = m.finalize().into_bytes();
-            Ok(full[..cipher.tag_len()].to_vec())
+            out[..tag_len].copy_from_slice(&full[..tag_len]);
         }
         // PROTOCOL.md 7.2: SipHash-2-4's native key is 128 bits, so it uses
         // only the first 16 bytes of the 32-byte epoch_key (RATIONALE.md
@@ -476,8 +541,11 @@ pub fn mac(
         // formula is a no-op for this suite, not a second step.
         CipherId::SipHash24 => {
             let sip_key: [u8; 16] = key[..16].try_into().expect("key is 32 bytes");
-            let tag = SipHasher24::new_with_key(&sip_key).hash(msg);
-            Ok(tag.to_be_bytes().to_vec())
+            let mut h = SipHasher24::new_with_key(&sip_key);
+            for part in parts {
+                h.write(part);
+            }
+            out[..tag_len].copy_from_slice(&h.finish().to_be_bytes());
         }
         // PROTOCOL.md 7.2, AAD-only RFC 8439: plaintext is empty, msg is
         // carried entirely as associated data, and only the 16-byte Poly1305
@@ -488,19 +556,28 @@ pub fn mac(
         // Nonce layout resolves a specification ambiguity (issue #63): 8
         // zero bytes followed by datagram_offset zero-extended to a 4-byte
         // big-endian u32, rather than reusing its native 3-byte header
-        // width -- see that issue for the reasoning and for what would need
-        // to change here if the specification is corrected differently.
+        // width -- see that issue for the reasoning and for what
+        // needs to change here if the specification is corrected differently.
         CipherId::ChaCha20Poly1305 => {
             let cipher = ChaCha20Poly1305::new(key.into());
             let mut nonce_bytes = [0u8; 12];
             nonce_bytes[8..].copy_from_slice(&datagram_offset.to_be_bytes());
+            let mut used = 0usize;
+            for part in parts {
+                if part.len() > MAX_DATAGRAM_IPV4 - used {
+                    return Err(Error::Oversize(used + part.len()));
+                }
+                stage[used..used + part.len()].copy_from_slice(part);
+                used += part.len();
+            }
             let empty: &mut [u8] = &mut []; // empty plaintext: AAD-only construction
             let tag = cipher
-                .encrypt_inout_detached((&nonce_bytes).into(), msg, empty.into())
+                .encrypt_inout_detached((&nonce_bytes).into(), &stage[..used], empty.into())
                 .expect("empty plaintext never overflows the AEAD size limit");
-            Ok(tag.to_vec())
+            out[..tag_len].copy_from_slice(&tag[..tag_len]);
         }
     }
+    Ok(())
 }
 
 /// Constant-time comparison (PROTOCOL.md 7.4: "Tag comparison MUST be
@@ -563,36 +640,40 @@ pub fn reconstruct_epoch(local_epoch: u32, epoch_low: u8) -> Option<u32> {
 /// Because offsets are clock ticks, `entries` is a *duration*: at 4096 ticks per
 /// second, 4096 entries is one second of reordering tolerance regardless of how
 /// fast the sender transmits.
-pub struct ReplayWindow {
+///
+/// `WORDS` fixes the bitmap's storage at compile time as `WORDS` `u64` words,
+/// so the window needs no heap at all (issue #83). One word covers 64 ticks;
+/// the default `WORDS = 64` covers 4096 ticks -- exactly one second of
+/// tolerance at the protocol's tick rate. Longer windows need more words, not
+/// a bigger allocation, so a window's footprint is a type-level decision.
+pub struct ReplayWindow<const WORDS: usize = DEFAULT_WINDOW_WORDS> {
     high: Option<u32>,
-    bits: Vec<u64>,
-    entries: u32,
+    bits: [u64; WORDS],
 }
 
-impl ReplayWindow {
-    pub fn new(entries: u32) -> Self {
-        assert!(
-            entries > 0 && entries.is_multiple_of(64),
-            "entries must be a positive multiple of 64"
-        );
+/// Word count of [`ReplayWindow::one_second`]: 64 words x 64 ticks = one
+/// second of tolerance at [`TICKS_PER_SEC`].
+pub const DEFAULT_WINDOW_WORDS: usize = 64;
+
+const _: () = assert!(DEFAULT_WINDOW_WORDS * 64 == TICKS_PER_SEC as usize);
+
+impl<const WORDS: usize> ReplayWindow<WORDS> {
+    /// Number of tick entries this window covers (`WORDS * 64`).
+    pub const ENTRIES: u32 = (WORDS * 64) as u32;
+
+    pub fn new() -> Self {
         Self {
             high: None,
-            bits: vec![0; (entries / 64) as usize],
-            entries,
+            bits: [0u64; WORDS],
         }
     }
 
-    /// One second of tolerance at the specified tick rate.
-    pub fn one_second() -> Self {
-        Self::new(TICKS_PER_SEC as u32)
-    }
-
     fn mark(&mut self, off: u32) {
-        let idx = (off % self.entries) as usize;
+        let idx = (off % Self::ENTRIES) as usize;
         self.bits[idx / 64] |= 1u64 << (idx % 64);
     }
     fn seen(&self, off: u32) -> bool {
-        let idx = (off % self.entries) as usize;
+        let idx = (off % Self::ENTRIES) as usize;
         self.bits[idx / 64] & (1u64 << (idx % 64)) != 0
     }
 
@@ -606,10 +687,10 @@ impl ReplayWindow {
             }
             Some(hi) if off > hi => {
                 // Clear the span we slid past, so wrapped indices are not stale.
-                let advance = (off - hi).min(self.entries);
+                let advance = (off - hi).min(Self::ENTRIES);
                 for i in 1..=advance {
                     let clear = hi.wrapping_add(i);
-                    let idx = (clear % self.entries) as usize;
+                    let idx = (clear % Self::ENTRIES) as usize;
                     self.bits[idx / 64] &= !(1u64 << (idx % 64));
                 }
                 self.high = Some(off);
@@ -617,7 +698,7 @@ impl ReplayWindow {
                 Ok(())
             }
             Some(hi) => {
-                if hi - off >= self.entries {
+                if hi - off >= Self::ENTRIES {
                     return Err(Error::Replay); // below the window
                 }
                 if self.seen(off) {
@@ -627,6 +708,23 @@ impl ReplayWindow {
                 Ok(())
             }
         }
+    }
+}
+
+// `one_second` lives on the concrete default type rather than the generic
+// impl: a `ReplayWindow::one_second()` path would otherwise leave the
+// const-generic parameter to inference and fail everywhere it is called
+// without an annotation (issue #83).
+impl ReplayWindow<DEFAULT_WINDOW_WORDS> {
+    /// One second of tolerance at the protocol's tick rate.
+    pub fn one_second() -> Self {
+        Self::new()
+    }
+}
+
+impl<const WORDS: usize> Default for ReplayWindow<WORDS> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -835,7 +933,7 @@ mod tests {
 
     #[test]
     fn replay_window_rejects_repeats_and_stale() {
-        let mut w = ReplayWindow::new(64);
+        let mut w: ReplayWindow = ReplayWindow::new();
         assert!(w.check_and_set(10).is_ok());
         assert_eq!(w.check_and_set(10), Err(Error::Replay));
         assert!(w.check_and_set(11).is_ok());
@@ -847,7 +945,7 @@ mod tests {
 
     #[test]
     fn replay_window_clears_on_slide() {
-        let mut w = ReplayWindow::new(64);
+        let mut w: ReplayWindow = ReplayWindow::new();
         assert!(w.check_and_set(5).is_ok());
         // Slide far enough that index 5 wraps to a fresh position.
         assert!(w.check_and_set(200).is_ok());

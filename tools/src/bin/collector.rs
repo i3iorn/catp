@@ -153,7 +153,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // A real collector serves many nodes; state is allocated here at
     // provisioning time, never on first contact (PROTOCOL.md 12.5).
-    let mut collector = Collector::new();
+    let mut collector: Collector = Collector::new();
 
     match bundle_dir {
         // Bulk-provision from `catp-provision`-generated bundles (PROTOCOL.md
