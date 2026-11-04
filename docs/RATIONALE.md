@@ -102,7 +102,7 @@ Justifies [PROTOCOL.md](PROTOCOL.md) §7.2.
 Poly1305 is a one-time authenticator. Two distinct messages authenticated under
 the same Poly1305 key allow an attacker to solve for the key and forge
 arbitrarily, so applying it directly as `MAC(epoch_key, message)` across an
-epoch — up to 65,536 datagrams under one key — would be a total break rather
+epoch — up to 524,288 datagrams under one key — would be a total break rather
 than a weakening.
 
 The RFC 8439 construction avoids this by deriving a fresh one-time Poly1305 key
@@ -152,7 +152,7 @@ sender's traffic exactly, which the per-record offsets it replaced could not do
 
 The cost is that the rate ceiling becomes a **pacing** constraint rather than a
 budget. A counter permitted a burst of any size so long as the per-epoch total
-stayed within 65,536; the offset permits no two datagrams in the same 244
+stayed within 524,288; the offset permits no two datagrams in the same 244
 microsecond tick, however small the burst. In practice a sender that would
 violate this is one emitting hundreds of datagrams per second, which the former
 `max_rate` guidance already discouraged — but the constraint is now structural

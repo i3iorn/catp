@@ -862,6 +862,18 @@ total order per sender: Section 10.1 forbids two datagrams from sharing an
 offset within an epoch, so the pair is a total order per sender rather than a
 partial one.
 
+That total order is **delivery order, not capture order**. Within a datagram
+the two coincide as well as the sender's flush timer allows (Section 6.6.1).
+Across datagrams they can invert: a `SERIES` at header offset `X` asserts
+readings with instants up to nearly the epoch's end (Section 6.9), so a
+datagram at offset `X + 1` can carry readings captured before the tail
+readings of the one before it, and `MESSAGE`'s body-embedded per-reading
+timestamps (Section 6.4.1) break the order the same way. A consumer that
+needs observations in capture order MUST sort by the per-reading instants
+itself; the protocol guarantees delivery order and per-reading instants, and
+deliberately does not promise that the two orders coincide beyond one
+datagram.
+
 #### 6.4.6 Mixed formats
 
 A datagram MAY carry records of differing `format`. Nothing in the framing
@@ -1255,19 +1267,37 @@ so far.
 
 `0x04` is the same HMAC-SHA256 construction as `0x01`, truncated to 4 bytes
 instead of 8. It exists because on a constrained link the tag is the single
-largest remaining cost: at 4 bytes it is a tenth of the 38-byte IPv4 overhead
-rather than a fifth of 42, and for a datagram carrying one small reading it is
-no longer larger than the data.
+largest remaining cost: at 4 bytes it is a tenth of the 41 bytes an IPv4
+datagram costs all-in (Section 3's table), rather than a fifth of the 45 the
+8-byte suites cost, and for a datagram carrying one small reading it is no
+longer larger than the data.
 
 A 4-byte tag gives roughly 2^-32 forgery probability per attempt, which is not
 adequate on its own. A receiver accepting `0x04` MUST therefore enforce a
 per-`sender_id` inbound rate limit (Section 10.3), and deployments MUST NOT
 select it where that limit cannot be enforced. This is a MUST rather than the
-SHOULD that applies to other suites: at 8 bytes rate limiting is defence in
-depth, while at 4 bytes it is what makes the tag length defensible at all. At a
-limit of 128 datagrams per second an attacker needs roughly a year of sustained
-flooding per expected forgery, and each attempt is a datagram the receiver
-counts.
+SHOULD that applies to other suites — and the limit's role must be stated
+precisely, because the obvious reading of it is wrong.
+
+**The rate limit does not bound forgery attempts.** Section 10.3 enforces it
+*after* authentication, on datagrams that have already verified. A blind
+forger's attempt rate is therefore bounded only by the receiver's pre-MAC
+filtering and MAC throughput — about 244,000 MACs per second on the reference
+hardware (DEPLOYMENT.md D2), and network capacity beyond that. At that rate
+the expected time to one successful forgery against a 4-byte tag is hours of
+sustained flooding, not the years a 128-datagrams-per-second reading of the
+limit would suggest. (An 8-byte tag at the same rate is beyond reach by
+millions of years, which is why `0x01` is the default.)
+
+**What the limit does bound** is the consequence and the visibility of the
+attempt: a forged datagram that wins consumes the *victim's* admission budget
+rather than an unbounded share of the receiver, displacing at most the
+legitimate traffic the limiter allots that sender; the per-sender counter
+separating MAC failures from pre-MAC rejections (Section 7.4) is the
+operationally visible signal that a forgery flood is under way; and at 2^-32
+per attempt the attacker needs sustained, detectable flooding rather than a
+lucky packet. Section 12.2 states the same conditions from the security
+side.
 
 `0x01` is the RECOMMENDED default. `0x02` is a lateral alternative for senders
 where SHA-256 is disproportionately expensive. `0x03` is for deployments
@@ -1577,6 +1607,40 @@ readable before any payload is parsed.
 ```
 datagram_offset = floor((unix_time - (epoch_id * 128)) * 4096)
 ```
+
+`floor` is the mathematical floor: rounding toward negative infinity, in both
+this formula and Section 9.2.4's epoch derivation, so the two agree at
+negative arguments too (a deployment with a pre-1970 clock has no valid time
+and follows Section 11; `asserted_time` is signed so a collector can state
+any time, but a receiver's persisted floor of Section 10.4 rejects recovery
+into a rejected past regardless).
+
+Three rules keep the formula well-defined where a naive implementation can go
+wrong:
+
+- **One time reading.** A sender MUST derive `epoch_id` (Section 9.2.4) and
+  `datagram_offset` from the same reading of its clock. Under that rule the
+  formula never produces `524,288`: the instant at which the offset would
+  reach it is exactly the instant at which `epoch_id` advances, and the
+  sender rolls to `(epoch_id + 1, offset 0)` instead. A sender whose
+  `epoch_id` lags its offset source (a coarse clock feeding one and a fine
+  one the other) MUST clamp the offset to `524,287` rather than let the
+  arithmetic overflow into the reserved bits (Section 4.2) — an overflowed
+  offset reads as `0` under a MAC that still verifies, which is the worst
+  kind of silent wrap — and SHOULD fix the clock split instead.
+- **No negative offsets.** `unix_time < epoch_id * 128` is a fault, not a
+  value: the 19-bit field cannot represent it and Section 9.3's
+  reconstruction can never produce such a pairing. A sender MUST NOT
+  transmit under an `epoch_id` its own time does not reach — which is also
+  what Section 9.4.2's announcement floor requires — and MUST suppress
+  transmission until its clock reaches the epoch it intends to send under.
+- **Tick resolution.** The offset is a per-tick claim: two datagrams computed
+  from a second-granularity clock share an offset, violating Section 10.3's
+  one-datagram-per-tick bound and, under `cipher_id` `0x03`, reusing a
+  Poly1305 nonce ([RATIONALE.md](RATIONALE.md) R5's key-compromise case). A
+  sender MUST hold sub-second time at least to the tick before it
+  transmits; a clock that cannot read sub-second time has no offset source,
+  and Section 11 is its path.
 
 A 128-second epoch contains exactly 524,288 ticks of 1/4096 second, so the
 19-bit field covers the epoch precisely: every value is reachable, none is out
@@ -1988,10 +2052,12 @@ per datagram over the shortest suite.
 
 At the other end, `cipher_id` `0x04` offers a 4-byte tag and roughly 2^-32
 forgery probability per attempt. That figure is only defensible in combination
-with the mandatory receiver-side rate limit of Section 8.1.1, which converts it
-from a number an attacker can grind down into one bounded by wall-clock time.
-Section 8.1.1 states the conditions; deployments that cannot meet them MUST NOT
-select `0x04`.
+with the mandatory receiver-side rate limit of Section 8.1.1 — which bounds
+what a winning forgery can consume and makes the attempt visible, while the
+bound on the *attempt rate itself* is the receiver's MAC throughput
+(Section 8.1.1's arithmetic: hours of sustained flooding per expected forgery
+at the measured ~244K/s). Section 8.1.1 states the conditions; deployments
+that cannot meet them MUST NOT select `0x04`.
 
 ### 12.3 Key compromise
 
