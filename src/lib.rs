@@ -565,7 +565,9 @@ pub fn mac_parts(
             let mut used = 0usize;
             for part in parts {
                 if part.len() > MAX_DATAGRAM_IPV4 - used {
-                    return Err(Error::Oversize(used + part.len()));
+                    // saturating: the error payload must not itself overflow
+                    // on a caller-supplied length near usize::MAX (issue #89).
+                    return Err(Error::Oversize(used.saturating_add(part.len())));
                 }
                 stage[used..used + part.len()].copy_from_slice(part);
                 used += part.len();
@@ -662,6 +664,15 @@ impl<const WORDS: usize> ReplayWindow<WORDS> {
     pub const ENTRIES: u32 = (WORDS * 64) as u32;
 
     pub fn new() -> Self {
+        // WORDS == 0 would make `off % Self::ENTRIES` a division by zero at
+        // the first check; refuse the instantiation at compile time, on every
+        // construction path (issue #89).
+        const {
+            assert!(
+                WORDS > 0,
+                "ReplayWindow needs at least one 64-tick word: WORDS must be > 0"
+            );
+        }
         Self {
             high: None,
             bits: [0u64; WORDS],
@@ -844,7 +855,13 @@ impl InboundLimiter {
         let refill = (self.per_sec as u64)
             .saturating_mul(1000)
             .saturating_mul(elapsed_ms);
-        self.tokens_micro = (self.tokens_micro + refill).min(self.capacity_micro);
+        // saturating: `refill` saturates at u64::MAX (per_sec x 1000 x elapsed),
+        // and an unchecked add would panic in debug / wrap in release
+        // (issue #89).
+        self.tokens_micro = self
+            .tokens_micro
+            .saturating_add(refill)
+            .min(self.capacity_micro);
         if self.tokens_micro >= 1_000_000 {
             self.tokens_micro -= 1_000_000;
             true
@@ -857,6 +874,21 @@ impl InboundLimiter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Issue #89: `tokens_micro + refill` used to overflow u64 when a caller
+    // handed in a huge monotonic timestamp; the add must saturate, and the
+    // bucket must clamp to capacity and still dispense.
+    #[test]
+    fn inbound_limiter_survives_a_huge_clock_step() {
+        let mut lim = InboundLimiter::new(RateLimit {
+            per_sec: u32::MAX,
+            burst: u32::MAX,
+        });
+        assert!(lim.try_acquire(0));
+        assert!(lim.try_acquire(u64::MAX));
+        // Clamped to capacity, not wrapped below the dispense threshold.
+        assert!(lim.tokens_micro >= 1_000_000);
+    }
 
     #[test]
     fn pacer_rejects_repeated_tick() {

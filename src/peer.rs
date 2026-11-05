@@ -182,7 +182,7 @@ impl<const WORDS: usize> PeerState<WORDS> {
     fn prune(&mut self, local_epoch: u32) {
         for slot in &mut self.windows {
             if let Some(ew) = slot
-                && !(ew.epoch + 1 >= local_epoch && ew.epoch <= local_epoch)
+                && !(local_epoch <= ew.epoch.saturating_add(1) && ew.epoch <= local_epoch)
             {
                 *slot = None;
             }
