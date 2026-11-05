@@ -180,13 +180,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     secret: DeviceSecret::new(SECRET),
                     cipher: CIPHER,
                     layouts: vec![
-                        (Format::None as u8, SENSOR_SCHEMA),
-                        (Format::None as u8, EVENT_SCHEMA),
-                        (Format::None as u8, ALARM_SCHEMA),
+                        Layout::new(Format::None as u8, SENSOR_SCHEMA),
+                        Layout::new(Format::None as u8, EVENT_SCHEMA),
+                        Layout::new(Format::None as u8, ALARM_SCHEMA),
                         // Without this pair the unstructured records are
                         // discarded unread, exactly like any other layout the
                         // receiver does not hold (PROTOCOL.md 6.4.2.2).
-                        (Format::None as u8, UNSTRUCTURED),
+                        Layout::new(Format::None as u8, UNSTRUCTURED),
                     ],
                     // Mandatory for CIPHER's 4-byte tag: without this,
                     // provision() itself refuses (PROTOCOL.md 8.1.1).

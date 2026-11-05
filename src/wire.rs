@@ -501,8 +501,8 @@ pub struct PeerConfig {
     pub sender_id: u32,
     pub secret: DeviceSecret,
     pub cipher: CipherId,
-    /// `(format, schema_version)` pairs this receiver can interpret.
-    pub layouts: Vec<(u8, u8)>,
+    /// Record layouts this receiver can interpret (PROTOCOL.md 6.4.4).
+    pub layouts: Vec<Layout>,
     /// Per-`sender_id` inbound rate limit (PROTOCOL.md 10.3, 8.1.1).
     ///
     /// `cipher`'s [`CipherId::requires_inbound_rate_limit`] decides whether
@@ -729,13 +729,18 @@ pub fn decode<const WORDS: usize>(
         out.raw = payload.to_vec();
     }
 
-    // --- step 10: skip records with unknown layouts, keep the rest
+    // --- step 10: skip records with unknown layouts, keep the rest.
+    // A record whose layout declares a fixed body width (Section 6.4.4) is
+    // additionally discarded individually when `size` disagrees with that
+    // width -- the record is skipped, not the whole datagram rejected.
     let mut skipped = Vec::new();
     if !out.records.is_empty() {
-        let (keep, drop): (Vec<_>, Vec<_>) = out
-            .records
-            .drain(..)
-            .partition(|r| peer.layouts.contains(&(r.format, r.schema_version)));
+        let (keep, drop): (Vec<_>, Vec<_>) = out.records.drain(..).partition(|r| {
+            peer.layouts.iter().any(|l| {
+                l.pair() == (r.format, r.schema_version)
+                    && l.fixed_width.is_none_or(|w| r.body.len() == w as usize)
+            })
+        });
         out.records = keep;
         skipped = drop;
     }
@@ -757,7 +762,7 @@ mod tests {
             sender_id: 0xDEADBEEF,
             secret: DeviceSecret::new([42u8; 32]),
             cipher: CipherId::HmacSha256T32,
-            layouts: vec![(Format::None as u8, 1)],
+            layouts: vec![Layout::new(Format::None as u8, 1)],
             // `decode()` is called directly in this module's tests, bypassing
             // PeerState::new's invariant check -- so this may stay None even
             // for a 0x04 peer.
@@ -955,6 +960,39 @@ mod tests {
         let acc = decode(&wire, &p, EPOCH, Direction::NodeToCollector, &mut w).unwrap();
         assert_eq!(acc.datagram.records, vec![held]);
         assert_eq!(acc.skipped, vec![same_width_unheld]);
+    }
+
+    /// PROTOCOL.md 6.4.4: where a `(format, schema_version)` pair names a
+    /// fixed-width layout, a record whose `size` disagrees with that width is
+    /// discarded individually -- the surrounding records are unaffected and
+    /// the datagram is accepted (issue #93).
+    #[test]
+    fn fixed_width_size_mismatch_discards_the_record_not_the_datagram() {
+        let mut p = peer();
+        p.layouts = vec![Layout::with_fixed_width(Format::None as u8, 1, 8)];
+        let held = Record::new(Format::None, 1, vec![0x11; 8]);
+        let mismatched = Record::new(Format::None, 1, vec![0x22; 6]); // same pair, wrong width
+        let dg = Datagram::data(
+            MsgType::Message,
+            CipherId::HmacSha256T32,
+            p.sender_id,
+            EPOCH,
+            5,
+            vec![held.clone(), mismatched.clone()],
+        )
+        .unwrap();
+        let wire = dg
+            .encode(
+                &p.secret,
+                EPOCH,
+                Direction::NodeToCollector,
+                MAX_DATAGRAM_IPV4,
+            )
+            .unwrap();
+        let mut w = ReplayWindow::one_second();
+        let acc = decode(&wire, &p, EPOCH, Direction::NodeToCollector, &mut w).unwrap();
+        assert_eq!(acc.datagram.records, vec![held]);
+        assert_eq!(acc.skipped, vec![mismatched]);
     }
 
     #[test]

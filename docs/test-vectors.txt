@@ -1400,6 +1400,22 @@ direction        00
 wire             2212001000123456781010015a102001229a79553fdd88e690
 wire_len         25
 
+# framing: fixed-width layout size mismatch skips the record, not the datagram
+kind         accept
+device_secret 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+sender_id    12345678
+epoch_id     13281250
+direction    00
+cipher_id    04
+msg_type     01
+offset       3
+fixed_width  8
+layout        01 01
+epoch_key    cf2819883ae2e26ddf4d7e0766fd91c3b11184a00775a3e01c923cf3768e8581
+auth_header  214000000300caa7e212345678
+wire         2142000003123456781010081111111111111111101006222222222222b149fb81
+wire_len     33
+
 # boundary: size 4095, the largest a record size field can name
 kind         accept
 device_secret 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f

@@ -31,7 +31,7 @@ fn peer(cipher: CipherId) -> PeerConfig {
         sender_id: SENDER_ID,
         secret: secret(),
         cipher,
-        layouts: vec![(Format::None as u8, 1)],
+        layouts: vec![Layout::new(Format::None as u8, 1)],
         inbound_rate_limit: None,
     }
 }

@@ -132,9 +132,9 @@ fn unhex(s: &str) -> Vec<u8> {
 
 /// All layouts permissive: this IUT checks the codec, not a deployment's
 /// provisioning (mirrors `tests/vectors.rs`).
-fn permissive_layouts() -> Vec<(u8, u8)> {
+fn permissive_layouts() -> Vec<Layout> {
     (1u8..=6)
-        .flat_map(|f| (0u8..=255).map(move |s| (f, s)))
+        .flat_map(|f| (0u8..=255).map(move |s| Layout::new(f, s)))
         .collect()
 }
 

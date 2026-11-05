@@ -16,6 +16,7 @@
 //! tier) -- a real registry service is a different project.
 
 use catp::CipherId;
+use catp::Layout;
 use catp::provisioning::Bundle;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -50,7 +51,7 @@ fn random_secret() -> [u8; 32] {
     buf
 }
 
-fn parse_layouts(spec: &str) -> Vec<(u8, u8)> {
+fn parse_layouts(spec: &str) -> Vec<Layout> {
     if spec.is_empty() {
         return Vec::new();
     }
@@ -66,7 +67,7 @@ fn parse_layouts(spec: &str) -> Vec<(u8, u8)> {
                     std::process::exit(2);
                 })
             };
-            (parse_byte(f, "format"), parse_byte(s, "schema_version"))
+            Layout::new(parse_byte(f, "format"), parse_byte(s, "schema_version"))
         })
         .collect()
 }
@@ -196,8 +197,8 @@ fn cmd_inspect(args: &[String]) -> ExitCode {
         println!("device_secret <hidden, pass --reveal-secret to print>");
     }
     println!("cipher_id     {:02x}", bundle.cipher_id);
-    for (f, s) in &bundle.layouts {
-        println!("layout        {f:02x} {s:02x}");
+    for l in &bundle.layouts {
+        println!("layout        {:02x} {:02x}", l.format, l.schema_version);
     }
     ExitCode::SUCCESS
 }
@@ -275,13 +276,13 @@ mod tests {
     fn parse_layouts_handles_multiple_pairs() {
         assert_eq!(
             parse_layouts("01:01,02:03"),
-            vec![(0x01, 0x01), (0x02, 0x03)]
+            vec![Layout::new(0x01, 0x01), Layout::new(0x02, 0x03)]
         );
     }
 
     #[test]
     fn parse_layouts_handles_empty() {
-        assert_eq!(parse_layouts(""), Vec::<(u8, u8)>::new());
+        assert_eq!(parse_layouts(""), Vec::<Layout>::new());
     }
 
     #[test]
@@ -369,7 +370,7 @@ mod tests {
             sender_id: 0xAABBCCDD,
             device_secret: [0x11; 32],
             cipher_id: 0x01,
-            layouts: vec![(1, 1)],
+            layouts: vec![Layout::new(1, 1)],
         };
         original.write_file(&old_path).unwrap();
 
