@@ -71,7 +71,7 @@ impl From<io::Error> for ProvisionError {
 /// 10.3), not device identity -- the same bundle can reasonably be loaded by
 /// collectors that apply different rate limits to it. See
 /// [`Bundle::into_peer_config`].
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Bundle {
     pub sender_id: u32,
     pub device_secret: [u8; 32],
@@ -80,6 +80,21 @@ pub struct Bundle {
     /// PROTOCOL.md 6.7.1's `CAPABILITY_ADVERTISE` similarly allows zero
     /// layouts.
     pub layouts: Vec<(u8, u8)>,
+}
+
+// Manual, not derived: a derived Debug would print the 32-byte device_secret,
+// and an accidental `{:?}` in a log line would leak the secret — the same
+// hygiene `DeviceSecret` enforces by implementing neither Debug nor Display
+// (issue #89).
+impl core::fmt::Debug for Bundle {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Bundle")
+            .field("sender_id", &self.sender_id)
+            .field("device_secret", &"[REDACTED; 32 bytes]")
+            .field("cipher_id", &self.cipher_id)
+            .field("layouts", &self.layouts)
+            .finish()
+    }
 }
 
 const HEADER_COMMENT: &str = "# CATP provisioning bundle v1";
@@ -302,6 +317,16 @@ pub fn load_bundles_dir(dir: &Path) -> Result<Vec<Bundle>, ProvisionError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Issue #89: a derived Debug printed the raw 32-byte secret; the manual
+    // impl redacts it.
+    #[test]
+    fn debug_redacts_the_secret() {
+        let b = sample();
+        let rendered = format!("{b:?}");
+        assert!(rendered.contains("[REDACTED; 32 bytes]"), "{rendered}");
+        assert!(!rendered.contains("42424242"), "{rendered}");
+    }
 
     fn sample() -> Bundle {
         Bundle {
