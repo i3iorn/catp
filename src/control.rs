@@ -29,8 +29,8 @@ pub enum Control {
 pub struct Capability {
     pub max_version: u8,
     pub ciphers: Vec<u8>,
-    /// `(format, schema_version)` pairs the sender can produce.
-    pub layouts: Vec<(u8, u8)>,
+    /// Record layouts the sender can produce (PROTOCOL.md 6.7.1).
+    pub layouts: Vec<Layout>,
 }
 
 impl Capability {
@@ -43,9 +43,9 @@ impl Capability {
         v.push(self.ciphers.len() as u8);
         v.extend_from_slice(&self.ciphers);
         v.push(self.layouts.len() as u8);
-        for (f, s) in &self.layouts {
-            v.push(*f);
-            v.push(*s);
+        for l in &self.layouts {
+            v.push(l.format);
+            v.push(l.schema_version);
         }
         Ok(v)
     }
@@ -69,7 +69,10 @@ impl Capability {
         // `p.len() == 3 + nc + nl * 2`, so this slice is exactly `nl` pairs.
         let (layout_pairs, remainder) = p[3 + nc..].as_chunks::<2>();
         debug_assert!(remainder.is_empty());
-        let layouts = layout_pairs.iter().map(|c| (c[0], c[1])).collect();
+        let layouts = layout_pairs
+            .iter()
+            .map(|c| Layout::new(c[0], c[1]))
+            .collect();
         Ok(Self {
             max_version,
             ciphers,
@@ -161,7 +164,7 @@ mod tests {
         let c = Capability {
             max_version: 1,
             ciphers: vec![0x01, 0x04],
-            layouts: vec![(0x01, 1), (0x02, 7)],
+            layouts: vec![Layout::new(0x01, 1), Layout::new(0x02, 7)],
         };
         let p = c.encode().unwrap();
         // PROTOCOL.md 6.7.1: 3 + cipher_count + layout_count*2

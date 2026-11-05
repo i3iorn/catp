@@ -211,7 +211,7 @@ fn every_accept_vector_verifies_and_reencodes() {
             secret: secret.clone(),
             cipher,
             layouts: (1u8..=6)
-                .flat_map(|f| (0u8..=255).map(move |s| (f, s)))
+                .flat_map(|f| (0u8..=255).map(move |s| Layout::new(f, s)))
                 .collect(),
             inbound_rate_limit: None, // decode() called directly; bypasses PeerState
         };
@@ -306,7 +306,7 @@ fn every_reject_datagram_vector_is_rejected() {
             secret: secret.clone(),
             cipher,
             layouts: (1u8..=6)
-                .flat_map(|f| (0u8..=255).map(move |s| (f, s)))
+                .flat_map(|f| (0u8..=255).map(move |s| Layout::new(f, s)))
                 .collect(),
             inbound_rate_limit: None,
         };
@@ -483,7 +483,7 @@ fn every_vector_is_tamper_evident() {
             secret,
             cipher,
             layouts: (1u8..=6)
-                .flat_map(|f| (0u8..=255).map(move |s| (f, s)))
+                .flat_map(|f| (0u8..=255).map(move |s| Layout::new(f, s)))
                 .collect(),
             inbound_rate_limit: None, // decode() called directly; bypasses PeerState
         };
@@ -560,4 +560,83 @@ fn json_mirror_matches_the_text_vectors() {
             );
         }
     }
+}
+
+/// The §6.4.4 fixed-width vector (issue #93): the datagram carries two
+/// records of the same `(format, schema_version)` pair, one at the layout's
+/// fixed body width and one at a size that disagrees with it. The receiver
+/// provisioned with `Layout::with_fixed_width` must accept the datagram,
+/// deliver the record whose `size` matches, and skip the mismatching record
+/// individually -- the surrounding records and the datagram itself survive.
+#[test]
+fn fixed_width_mismatch_skips_the_record_not_the_datagram() {
+    let json_text = std::fs::read_to_string("docs/test-vectors.json")
+        .expect("docs/test-vectors.json missing; run `cargo run --bin catp-vectors`");
+    let fixed_width_vectors: Vec<_> = tinyjson::parse_array_of_objects(&json_text)
+        .into_iter()
+        .filter(|m| m.get("kind").map(String::as_str) == Some("accept"))
+        .filter(|m| m.get("fixed_width").is_some())
+        .collect();
+    assert_eq!(
+        fixed_width_vectors.len(),
+        1,
+        "expected one fixed-width vector"
+    );
+
+    let m = &fixed_width_vectors[0];
+    let secret = DeviceSecret::new(unhex(&m["device_secret"]).try_into().unwrap());
+    let sender_id = u32::from_str_radix(&m["sender_id"], 16).unwrap();
+    let epoch: u32 = m["epoch_id"].parse().unwrap();
+    let dir = match unhex(&m["direction"])[0] {
+        0x00 => Direction::NodeToCollector,
+        _ => Direction::CollectorToNode,
+    };
+    let cipher = CipherId::from_u8(unhex(&m["cipher_id"])[0]).unwrap();
+    let fixed_width: u16 = m["fixed_width"].parse().unwrap();
+    let mut layout_fields = m["layout"].split_whitespace();
+    let layout_format = u8::from_str_radix(
+        layout_fields.next().expect("layout needs a format byte"),
+        16,
+    )
+    .unwrap();
+    let layout_schema = u8::from_str_radix(
+        layout_fields
+            .next()
+            .expect("layout needs a schema_version byte"),
+        16,
+    )
+    .unwrap();
+    let wire = unhex(&m["wire"]);
+
+    let peer = PeerConfig {
+        sender_id,
+        secret: secret.clone(),
+        cipher,
+        layouts: vec![Layout::with_fixed_width(
+            layout_format,
+            layout_schema,
+            fixed_width,
+        )],
+        inbound_rate_limit: None,
+    };
+    let mut w = ReplayWindow::one_second();
+    let acc = decode(&wire, &peer, epoch, dir, &mut w)
+        .unwrap_or_else(|e| panic!("fixed-width vector failed to decode: {e:?}"));
+
+    // Exactly one record delivered (its body is the fixed width) and exactly
+    // one skipped (same pair, size disagrees with the width).
+    assert_eq!(acc.datagram.records.len(), 1);
+    let kept = &acc.datagram.records[0];
+    assert_eq!(kept.body.len(), fixed_width as usize);
+    assert_eq!(
+        (kept.format, kept.schema_version),
+        (layout_format, layout_schema)
+    );
+    assert_eq!(acc.skipped.len(), 1);
+    let skipped = &acc.skipped[0];
+    assert_ne!(skipped.body.len(), fixed_width as usize);
+    assert_eq!(
+        (skipped.format, skipped.schema_version),
+        (layout_format, layout_schema)
+    );
 }

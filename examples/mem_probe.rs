@@ -40,7 +40,7 @@ fn main() {
                 sender_id: i,
                 secret: DeviceSecret::new([(i & 0xFF) as u8; 32]),
                 cipher: CipherId::HmacSha256T64,
-                layouts: vec![(Format::None as u8, 1)],
+                layouts: vec![Layout::new(Format::None as u8, 1)],
                 inbound_rate_limit: None,
             })
             .unwrap();

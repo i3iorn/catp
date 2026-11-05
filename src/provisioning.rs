@@ -25,6 +25,7 @@
 //! layout        02 03
 //! ```
 
+use crate::layout::Layout;
 use crate::wire::PeerConfig;
 use crate::{CipherId, DeviceSecret, Error, RateLimit};
 use std::fmt;
@@ -76,10 +77,10 @@ pub struct Bundle {
     pub sender_id: u32,
     pub device_secret: [u8; 32],
     pub cipher_id: u8,
-    /// `(format, schema_version)` pairs, in file order. May be empty --
+    /// Record layouts, in file order. May be empty --
     /// PROTOCOL.md 6.7.1's `CAPABILITY_ADVERTISE` similarly allows zero
     /// layouts.
-    pub layouts: Vec<(u8, u8)>,
+    pub layouts: Vec<Layout>,
 }
 
 // Manual, not derived: a derived Debug would print the 32-byte device_secret,
@@ -113,9 +114,10 @@ impl Bundle {
         }
         out.push('\n');
         out.push_str(&format!("cipher_id     {:02x}\n", self.cipher_id));
-        for (format, schema_version) in &self.layouts {
+        for layout in &self.layouts {
             out.push_str(&format!(
-                "layout        {format:02x} {schema_version:02x}\n"
+                "layout        {:02x} {:02x}\n",
+                layout.format, layout.schema_version
             ));
         }
         out
@@ -169,14 +171,26 @@ impl Bundle {
                     let schema_version = parts
                         .next()
                         .ok_or_else(|| bad("layout line needs a schema_version byte"))?;
+                    // The third field is the optional fixed body width.
+                    let fixed_width = match parts.next() {
+                        Some(w) => Some(
+                            w.parse::<u16>()
+                                .map_err(|_| bad("layout fixed_width is not a valid number"))?,
+                        ),
+                        None => None,
+                    };
                     if parts.next().is_some() {
-                        return Err(bad("layout line has more than two fields"));
+                        return Err(bad("layout line has more than three fields"));
                     }
                     let format = u8::from_str_radix(format, 16)
                         .map_err(|_| bad("layout format is not hex"))?;
                     let schema_version = u8::from_str_radix(schema_version, 16)
                         .map_err(|_| bad("layout schema_version is not hex"))?;
-                    layouts.push((format, schema_version));
+                    let layout = match fixed_width {
+                        Some(w) => Layout::with_fixed_width(format, schema_version, w),
+                        None => Layout::new(format, schema_version),
+                    };
+                    layouts.push(layout);
                 }
                 other => return Err(bad(&format!("unrecognized field '{other}'"))),
             }
@@ -333,7 +347,7 @@ mod tests {
             sender_id: 0x1234_5678,
             device_secret: [0x42; 32],
             cipher_id: 0x04,
-            layouts: vec![(0x01, 0x01), (0x02, 0x03)],
+            layouts: vec![Layout::new(0x01, 0x01), Layout::new(0x02, 0x03)],
         }
     }
 
@@ -370,7 +384,7 @@ mod tests {
     #[test]
     fn to_text_matches_documented_format() {
         let b = Bundle {
-            layouts: vec![(1, 1)],
+            layouts: vec![Layout::new(1, 1)],
             ..sample()
         };
         let text = b.to_text();

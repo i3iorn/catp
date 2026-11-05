@@ -19,7 +19,10 @@ fn cfg(id: u32, seed: u8, cipher: CipherId) -> PeerConfig {
         sender_id: id,
         secret: secret(seed),
         cipher,
-        layouts: vec![(Format::None as u8, SCHEMA), (Format::Cbor as u8, SCHEMA)],
+        layouts: vec![
+            Layout::new(Format::None as u8, SCHEMA),
+            Layout::new(Format::Cbor as u8, SCHEMA),
+        ],
         // Generous on purpose: these are end-to-end scenarios, not rate-limit
         // tests (that coverage is peer.rs's
         // exceeding_the_inbound_limit_discards_authenticated_traffic_and_counts_it,
@@ -777,7 +780,8 @@ fn unstructured_still_has_to_be_provisioned() {
     // Provisioned: both records are delivered, sharing one instant.
     let mut col = Collector::new();
     let mut c = cfg(NODE, 1, CipherId::HmacSha256T32);
-    c.layouts.push((Format::None as u8, SCHEMA_UNSTRUCTURED));
+    c.layouts
+        .push(Layout::new(Format::None as u8, SCHEMA_UNSTRUCTURED));
     col.provision(c).unwrap();
     let acc = col
         .accept(&build(), epoch, Direction::NodeToCollector, 0)

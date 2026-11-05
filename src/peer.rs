@@ -521,7 +521,7 @@ mod tests {
             sender_id: id,
             secret: DeviceSecret::new([(id & 0xFF) as u8; 32]),
             cipher: CipherId::HmacSha256T32,
-            layouts: vec![(Format::None as u8, 1)],
+            layouts: vec![Layout::new(Format::None as u8, 1)],
             inbound_rate_limit: Some(RateLimit::RECOMMENDED_DEFAULT),
         }
     }
@@ -544,7 +544,7 @@ mod tests {
             sender_id: 1,
             secret: secret.clone(),
             cipher: CipherId::HmacSha256T32,
-            layouts: vec![(Format::None as u8, 1)],
+            layouts: vec![Layout::new(Format::None as u8, 1)],
             inbound_rate_limit: Some(RateLimit::RECOMMENDED_DEFAULT),
         })
         .unwrap();
@@ -580,7 +580,7 @@ mod tests {
             sender_id: 1,
             secret: secret.clone(),
             cipher: CipherId::HmacSha256T32,
-            layouts: vec![(Format::None as u8, 1)],
+            layouts: vec![Layout::new(Format::None as u8, 1)],
             inbound_rate_limit: Some(RateLimit::RECOMMENDED_DEFAULT),
         })
         .unwrap();
@@ -689,7 +689,7 @@ mod tests {
             sender_id: 1,
             secret: secret.clone(),
             cipher: CipherId::HmacSha256T32,
-            layouts: vec![(Format::None as u8, 1)],
+            layouts: vec![Layout::new(Format::None as u8, 1)],
             inbound_rate_limit: Some(RateLimit {
                 per_sec: 10,
                 burst: 2,
@@ -833,7 +833,7 @@ mod tests {
             cipher: CipherId::HmacSha256T32,
             // Holds only v1; the datagram below carries v1 and v2 records, so
             // the v2 one must be skipped, not rejected (PROTOCOL.md 6.4.4).
-            layouts: vec![(Format::None as u8, 1)],
+            layouts: vec![Layout::new(Format::None as u8, 1)],
             inbound_rate_limit: Some(RateLimit::RECOMMENDED_DEFAULT),
         })
         .unwrap();
@@ -867,7 +867,7 @@ mod tests {
             sender_id: 1,
             secret: secret.clone(),
             cipher: CipherId::HmacSha256T32,
-            layouts: vec![(Format::None as u8, 1)],
+            layouts: vec![Layout::new(Format::None as u8, 1)],
             inbound_rate_limit: Some(RateLimit::RECOMMENDED_DEFAULT),
         })
         .unwrap();
@@ -911,7 +911,7 @@ mod tests {
             sender_id: 1,
             secret: secret.clone(),
             cipher: CipherId::HmacSha256T32,
-            layouts: vec![(Format::None as u8, 1)],
+            layouts: vec![Layout::new(Format::None as u8, 1)],
             inbound_rate_limit: Some(RateLimit {
                 per_sec: 10,
                 burst: 1,

@@ -37,12 +37,14 @@ use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 pub mod control;
+pub mod layout;
 pub mod peer;
 #[cfg(feature = "std")]
 pub mod provisioning;
 pub mod wire;
 
 pub use control::{Capability, Control};
+pub use layout::Layout;
 #[cfg(feature = "std")]
 pub use peer::Collector;
 pub use peer::{NodeClock, PeerState, Stats};

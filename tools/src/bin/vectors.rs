@@ -68,6 +68,68 @@ fn accept(
     accept_cross(json, name, secret, epoch, epoch, dir, dg);
 }
 
+/// An `accept` vector whose receiver configures the `Layout` named on the
+/// wire with the fixed body width `fixed_width` (PROTOCOL.md 6.4.4): the
+/// mismatched record must be skipped, the datagram accepted.
+fn accept_fixed_width(
+    json: &mut JsonVectors,
+    name: &str,
+    secret: &DeviceSecret,
+    epoch: u32,
+    dir: Direction,
+    dg: &Datagram,
+    layout: Layout,
+) {
+    let fixed_width = layout
+        .fixed_width
+        .expect("emitter requires a fixed-width layout");
+    let wire = dg
+        .encode(secret, epoch, dir, 65535)
+        .expect("vector must encode");
+    let key = secret.epoch_key(dg.sender_id, epoch, dir);
+    let auth_header = dg.auth_header(epoch);
+    println!("# {name}");
+    println!("kind         accept");
+    println!("device_secret {}", hex(secret.expose_secret()));
+    println!("sender_id    {:08x}", dg.sender_id);
+    println!("epoch_id     {epoch}");
+    println!("direction    {:02x}", dir as u8);
+    println!("cipher_id    {:02x}", dg.cipher_id);
+    println!("msg_type     {:02x}", dg.msg_type);
+    println!("offset       {}", dg.datagram_offset);
+    println!("fixed_width  {fixed_width}");
+    println!(
+        "layout        {:02x} {:02x}",
+        layout.pair().0,
+        layout.pair().1
+    );
+    println!("epoch_key    {}", hex(&key[..]));
+    println!("auth_header  {}", hex(&auth_header));
+    println!("wire         {}", hex(&wire));
+    println!("wire_len     {}", wire.len());
+    println!();
+    json.push(&[
+        ("name", json_str(name)),
+        ("kind", json_str("accept")),
+        ("device_secret", json_str(&hex(secret.expose_secret()))),
+        ("sender_id", json_str(&format!("{:08x}", dg.sender_id))),
+        ("epoch_id", epoch.to_string()),
+        ("direction", json_str(&format!("{:02x}", dir as u8))),
+        ("cipher_id", json_str(&format!("{:02x}", dg.cipher_id))),
+        ("msg_type", json_str(&format!("{:02x}", dg.msg_type))),
+        ("offset", dg.datagram_offset.to_string()),
+        ("fixed_width", fixed_width.to_string()),
+        (
+            "layout",
+            json_str(&format!("{:02x} {:02x}", layout.pair().0, layout.pair().1)),
+        ),
+        ("epoch_key", json_str(&hex(&key[..]))),
+        ("auth_header", json_str(&hex(&auth_header))),
+        ("wire", json_str(&hex(&wire))),
+        ("wire_len", wire.len().to_string()),
+    ]);
+}
+
 /// As `accept`, but the datagram was *encoded* under `enc_epoch` while the
 /// receiver sits at `rx_epoch` (PROTOCOL.md 9.3 accepts `{rx-1, rx}`). When
 /// the two differ the vector carries an `encode_epoch` field; consumers derive
@@ -490,7 +552,7 @@ fn main() {
                 &Capability {
                     max_version: 1,
                     ciphers: vec![0x01, 0x04],
-                    layouts: vec![(0x01, 1), (0x02, 2)],
+                    layouts: vec![Layout::new(0x01, 1), Layout::new(0x02, 2)],
                 }
                 .encode()
                 .unwrap(),
@@ -870,6 +932,32 @@ fn main() {
         ),
         "framing_event_two_records",
         &rx,
+    );
+
+    // --- §6.4.4 fixed-width layout: a `size` that disagrees with the layout's
+    // fixed body width discards the record individually -- the datagram is
+    // accepted and the held record delivered (the seventh §14.1 fault, issue
+    // #93). The receiver holds (Format::None, 1) with fixed body width 8, so
+    // the 8-byte record survives and the 6-byte one lands in `skipped`.
+    accept_fixed_width(
+        &mut json,
+        "framing: fixed-width layout size mismatch skips the record, not the datagram",
+        &s,
+        epoch,
+        n2c,
+        &Datagram::data(
+            MsgType::Message,
+            CipherId::HmacSha256T32,
+            id,
+            epoch,
+            3,
+            vec![
+                Record::new(Format::None, 1, vec![0x11; 8]),
+                Record::new(Format::None, 1, vec![0x22; 6]),
+            ],
+        )
+        .unwrap(),
+        Layout::with_fixed_width(Format::None as u8, 1, 8),
     );
 
     // --- §14.1 boundary set: the size ceiling, and the epoch-boundary pair ---
